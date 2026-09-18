@@ -211,3 +211,5 @@ with tab1:
     col_f1, col_f2, col_f3 = st.columns(3)
     
     with col_f1:
+        st.markdown("#### 🏢 Active Real-Time Mechanism")
+        with st.container(border=True):
