@@ -6,7 +6,7 @@ from datetime import datetime
 
 
 # ============================================================
-# PAGE CONFIGURATION
+# PAGE CONFIG
 # ============================================================
 
 st.set_page_config(
@@ -18,7 +18,7 @@ st.set_page_config(
 
 
 # ============================================================
-# CUSTOM CSS
+# CSS
 # ============================================================
 
 st.markdown("""
@@ -28,11 +28,11 @@ st.markdown("""
     background: #eef2f6;
 }
 
-/* ---------- HEADER ---------- */
+/* ================= HEADER ================= */
 
 .header {
     background: linear-gradient(135deg, #071a2b, #123f63);
-    padding: 26px 32px;
+    padding: 28px 32px;
     border-radius: 16px;
     margin-bottom: 20px;
     box-shadow: 0 6px 18px rgba(0,0,0,0.15);
@@ -52,9 +52,9 @@ st.markdown("""
 }
 
 .online {
-    margin-top: 13px;
     display: inline-block;
-    padding: 6px 12px;
+    margin-top: 13px;
+    padding: 6px 13px;
     border-radius: 20px;
     background: rgba(60,220,120,0.12);
     color: #58e38b;
@@ -62,41 +62,42 @@ st.markdown("""
     font-weight: 700;
 }
 
-/* ---------- SECTION ---------- */
+/* ================= SECTIONS ================= */
 
 .section-title {
     font-size: 18px;
     font-weight: 800;
     color: #16324a;
-    margin-top: 15px;
-    margin-bottom: 10px;
-    border-bottom: 2px solid #c7d2dc;
+    margin-top: 18px;
+    margin-bottom: 12px;
     padding-bottom: 7px;
+    border-bottom: 2px solid #c7d2dc;
 }
 
-/* ---------- CARDS ---------- */
+/* ================= CARDS ================= */
 
 .status-card {
     background: white;
     border-radius: 12px;
     padding: 16px;
-    min-height: 115px;
+    min-height: 105px;
     border: 1px solid #d8e0e8;
     box-shadow: 0 3px 10px rgba(0,0,0,0.05);
 }
 
 .card-label {
-    font-size: 12px;
+    font-size: 11px;
     color: #6c7a89;
-    font-weight: 700;
+    font-weight: 800;
     text-transform: uppercase;
+    letter-spacing: 0.5px;
 }
 
 .card-value {
-    font-size: 27px;
+    font-size: 26px;
     font-weight: 800;
     color: #102a43;
-    margin-top: 7px;
+    margin-top: 8px;
 }
 
 .card-unit {
@@ -104,12 +105,53 @@ st.markdown("""
     color: #718096;
 }
 
-/* ---------- PHASES ---------- */
+/* ================= CURRENT OPERATION ================= */
+
+.operation {
+    background: white;
+    padding: 20px 22px;
+    border-radius: 13px;
+    border: 1px solid #d9e1e8;
+    box-shadow: 0 3px 12px rgba(0,0,0,0.05);
+}
+
+.operation h3 {
+    color: #16324a;
+    margin-top: 0;
+    margin-bottom: 8px;
+}
+
+.operation p {
+    color: #657786;
+    margin-bottom: 14px;
+}
+
+/* ================= TARGET ================= */
+
+.target-achieved {
+    background: #e8f8ed;
+    border-left: 6px solid #28a745;
+    border-radius: 10px;
+    padding: 18px;
+    margin: 15px 0;
+    color: #145c2a;
+    font-weight: 800;
+}
+
+.target-box {
+    background: #e9f4ff;
+    border-left: 5px solid #2b78c5;
+    border-radius: 10px;
+    padding: 15px;
+    margin-top: 18px;
+}
+
+/* ================= PHASES ================= */
 
 .phase {
-    padding: 15px;
+    padding: 16px;
     border-radius: 12px;
-    margin-bottom: 10px;
+    min-height: 190px;
     border: 1px solid #d9e0e7;
     background: #f7f9fb;
 }
@@ -125,51 +167,34 @@ st.markdown("""
 }
 
 .phase-pending {
-    opacity: 0.55;
+    opacity: 0.52;
+}
+
+.phase-icon {
+    font-size: 25px;
+    margin-bottom: 7px;
 }
 
 .phase-title {
     font-weight: 800;
     color: #183b56;
+    font-size: 14px;
 }
 
 .phase-description {
     font-size: 12px;
     color: #657786;
-    margin-top: 4px;
+    margin-top: 7px;
+    line-height: 1.4;
 }
 
-/* ---------- TARGET ---------- */
-
-.target-box {
-    background: #e9f4ff;
-    border-left: 5px solid #2b78c5;
-    border-radius: 10px;
-    padding: 14px;
-    margin: 12px 0;
-}
-
-.target-achieved {
-    background: #e8f8ed;
-    border-left: 6px solid #28a745;
-    border-radius: 10px;
-    padding: 18px;
-    margin: 15px 0;
-    color: #145c2a;
+.phase-status {
+    margin-top: 12px;
+    font-size: 12px;
     font-weight: 800;
 }
 
-/* ---------- OPERATION ---------- */
-
-.operation {
-    background: white;
-    padding: 18px;
-    border-radius: 12px;
-    border: 1px solid #d9e1e8;
-    box-shadow: 0 3px 10px rgba(0,0,0,0.04);
-}
-
-/* ---------- FOOTER ---------- */
+/* ================= FOOTER ================= */
 
 .footer {
     text-align: center;
@@ -178,17 +203,18 @@ st.markdown("""
     padding: 25px;
 }
 
-/* ---------- BUTTONS ---------- */
+/* ================= SIDEBAR ================= */
+
+section[data-testid="stSidebar"] {
+    background: #f8fafc;
+}
+
+/* ================= BUTTONS ================= */
 
 .stButton > button {
     border-radius: 9px;
     font-weight: 700;
-}
-
-/* ---------- SIDEBAR ---------- */
-
-section[data-testid="stSidebar"] {
-    background: #f8fafc;
+    min-height: 42px;
 }
 
 </style>
@@ -196,40 +222,50 @@ section[data-testid="stSidebar"] {
 
 
 # ============================================================
-# PROJECT PARAMETERS
+# PHASE DEFINITIONS
 # ============================================================
 
 PHASES = {
+
     1: {
         "name": "MECHANICAL LOADING",
-        "description": "NiTi element is mechanically loaded to the selected strain.",
+        "description":
+            "NiTi element is mechanically loaded to the selected strain.",
         "icon": "⚙️"
     },
+
     2: {
         "name": "HEAT REJECTION",
-        "description": "Generated heat is rejected using forced-air heat transfer.",
+        "description":
+            "Generated heat is rejected using forced-air heat transfer.",
         "icon": "↗️"
     },
+
     3: {
         "name": "MECHANICAL UNLOADING",
-        "description": "NiTi is unloaded and the elastocaloric cooling effect is generated.",
+        "description":
+            "NiTi is unloaded and the elastocaloric cooling effect is generated.",
         "icon": "❄️"
     },
+
     4: {
         "name": "COLD-SIDE RECOVERY",
-        "description": "Cooling is transferred to the enclosed cold-side chamber.",
+        "description":
+            "Cooling is transferred to the enclosed cold-side chamber.",
         "icon": "◆"
     }
 }
 
 
 # ============================================================
-# SESSION STATE INITIALIZATION
+# SESSION STATE
 # ============================================================
 
 defaults = {
+
     "stage": 0,
     "cycle_count": 0,
+
     "automatic": False,
     "target_reached": False,
 
@@ -241,10 +277,10 @@ defaults = {
     "strain": 0.0,
     "cop": 0.0,
 
-    "time": 0.0,
-    "last_phase": 0,
+    "simulation_time": 0.0,
 
     "message": "SYSTEM READY",
+
     "events": [],
 
     "temperature_time": [0.0],
@@ -257,12 +293,14 @@ defaults = {
 }
 
 for key, value in defaults.items():
+
     if key not in st.session_state:
+
         st.session_state[key] = value
 
 
 # ============================================================
-# SIDEBAR SETTINGS
+# SIDEBAR
 # ============================================================
 
 with st.sidebar:
@@ -301,23 +339,23 @@ with st.sidebar:
 
     length = st.number_input(
         "Active Length (mm)",
-        min_value=20,
-        max_value=500,
-        value=150
+        20,
+        500,
+        150
     )
 
     outer_diameter = st.number_input(
         "Outer Diameter (mm)",
-        min_value=1.0,
-        max_value=50.0,
-        value=12.0
+        1.0,
+        50.0,
+        12.0
     )
 
     inner_diameter = st.number_input(
         "Inner Diameter (mm)",
-        min_value=0.0,
-        max_value=49.0,
-        value=10.0
+        0.0,
+        49.0,
+        10.0
     )
 
     st.markdown("### Mechanical Parameters")
@@ -331,7 +369,7 @@ with st.sidebar:
     )
 
     actuation = st.selectbox(
-        "Actuation Mode",
+        "Actuation",
         [
             "Uniaxial Tension",
             "Uniaxial Compression"
@@ -371,7 +409,7 @@ with st.sidebar:
         50
     )
 
-    st.markdown("### Controller Mode")
+    st.markdown("### Controller")
 
     mode = st.radio(
         "Operating Mode",
@@ -384,6 +422,7 @@ with st.sidebar:
         "🔄 RESET CONTROLLER",
         use_container_width=True
     ):
+
         st.session_state.stage = 0
         st.session_state.cycle_count = 0
         st.session_state.automatic = False
@@ -397,10 +436,10 @@ with st.sidebar:
         st.session_state.strain = 0
         st.session_state.cop = 0
 
-        st.session_state.time = 0
-        st.session_state.last_phase = 0
+        st.session_state.simulation_time = 0
 
-        st.session_state.message = "SYSTEM RESET"
+        st.session_state.message = "SYSTEM READY"
+
         st.session_state.events = []
 
         st.session_state.temperature_time = [0]
@@ -415,7 +454,7 @@ with st.sidebar:
 
 
 # ============================================================
-# HELPER FUNCTIONS
+# FUNCTIONS
 # ============================================================
 
 def add_event(message):
@@ -435,31 +474,38 @@ def add_event(message):
 def material_factor():
 
     factors = {
+
         "NiTi Nitinol": 1.10,
+
         "Cu-Al-Ni SMA": 0.85,
+
         "Fe-Mn-Si SMA": 0.65,
+
         "Elastocaloric Polymer": 1.00
+
     }
 
     return factors[material]
 
 
-def model_delta_t():
+def calculate_delta_t():
 
     return (
+
         12.0
         * material_factor()
         * (max_strain / 5.0)
         * np.sqrt(elements / 5.0)
+
     )
 
 
 def append_history():
 
-    st.session_state.time += phase_time
+    st.session_state.simulation_time += phase_time
 
     st.session_state.temperature_time.append(
-        st.session_state.time
+        st.session_state.simulation_time
     )
 
     st.session_state.chamber_history.append(
@@ -482,15 +528,17 @@ def append_history():
         st.session_state.strain
     )
 
-    max_points = 120
+    max_points = 150
 
     for key in [
+
         "temperature_time",
         "chamber_history",
         "niti_history",
         "air_history",
         "stress_history",
         "strain_history"
+
     ]:
 
         st.session_state[key] = (
@@ -499,33 +547,36 @@ def append_history():
 
 
 # ============================================================
-# PHASE EXECUTION ENGINE
+# RUN PHASE
 # ============================================================
 
 def run_phase(phase):
 
     if st.session_state.target_reached:
+
         return True
 
-    delta_t = model_delta_t()
+    delta_t = calculate_delta_t()
+
 
     # --------------------------------------------------------
-    # PHASE 1 - LOADING
+    # PHASE 1
     # --------------------------------------------------------
 
     if phase == 1:
 
         st.session_state.strain = max_strain
 
-        stress_value = (
+        stress = (
             450
             + max_strain * 12
         )
 
         if actuation == "Uniaxial Compression":
-            stress_value *= -1
 
-        st.session_state.stress = stress_value
+            stress *= -1
+
+        st.session_state.stress = stress
 
         st.session_state.niti_temp = (
             ambient + delta_t
@@ -536,52 +587,61 @@ def run_phase(phase):
         )
 
         st.session_state.message = (
-            "NiTi mechanical loading in progress"
+            "Mechanical loading in progress"
         )
 
+
     # --------------------------------------------------------
-    # PHASE 2 - HEAT REJECTION
+    # PHASE 2
     # --------------------------------------------------------
 
     elif phase == 2:
 
         st.session_state.strain = max_strain
 
-        stress_value = 410
+        stress = 410
 
         if actuation == "Uniaxial Compression":
-            stress_value *= -1
 
-        st.session_state.stress = stress_value
+            stress *= -1
 
-        rejection_factor = (
-            min(1.0, airflow / 50.0)
+        st.session_state.stress = stress
+
+        airflow_factor = min(
+            1.0,
+            airflow / 50.0
         )
 
         st.session_state.niti_temp = (
+
             ambient
             + delta_t
-            * (1.0 - 0.65 * rejection_factor)
+            * (1 - 0.65 * airflow_factor)
+
         )
 
         st.session_state.air_temp = (
+
             ambient
             + delta_t
             * 0.12
-            * rejection_factor
+            * airflow_factor
+
         )
 
         st.session_state.message = (
             "Heat rejection using forced airflow"
         )
 
+
     # --------------------------------------------------------
-    # PHASE 3 - UNLOADING
+    # PHASE 3
     # --------------------------------------------------------
 
     elif phase == 3:
 
         st.session_state.strain = 0.0
+
         st.session_state.stress = 120
 
         st.session_state.niti_temp = (
@@ -596,30 +656,38 @@ def run_phase(phase):
             "Elastocaloric cooling generated"
         )
 
+
     # --------------------------------------------------------
-    # PHASE 4 - COLD-SIDE RECOVERY
+    # PHASE 4
     # --------------------------------------------------------
 
     elif phase == 4:
 
         st.session_state.strain = 0.0
+
         st.session_state.stress = 0.0
 
         cooling_factor = (
+
             0.035
             * (airflow / 50.0)
             * np.sqrt(elements / 5.0)
+
         )
 
-        current = st.session_state.chamber_temp
+        current_temp = (
+            st.session_state.chamber_temp
+        )
 
         new_temp = (
-            current
-            - (current - target)
+
+            current_temp
+            - (current_temp - target)
             * cooling_factor
             - 0.18
             * material_factor()
             * (max_strain / 5.0)
+
         )
 
         st.session_state.chamber_temp = new_temp
@@ -634,7 +702,7 @@ def run_phase(phase):
 
         cooling_load = max(
             0.1,
-            ambient - st.session_state.chamber_temp
+            ambient - new_temp
         )
 
         input_work = max(
@@ -653,14 +721,16 @@ def run_phase(phase):
             "Cold-side recovery in progress"
         )
 
+
     # --------------------------------------------------------
-    # RECORD DATA
+    # SAVE DATA
     # --------------------------------------------------------
 
     append_history()
 
+
     # --------------------------------------------------------
-    # TARGET TEMPERATURE CHECK
+    # TARGET CHECK
     # --------------------------------------------------------
 
     if st.session_state.chamber_temp <= target:
@@ -668,6 +738,7 @@ def run_phase(phase):
         st.session_state.chamber_temp = target
 
         st.session_state.target_reached = True
+
         st.session_state.automatic = False
 
         st.session_state.message = (
@@ -675,7 +746,8 @@ def run_phase(phase):
         )
 
         add_event(
-            f"Target temperature {target:.1f} °C achieved."
+            f"Target temperature "
+            f"{target:.1f} °C achieved."
         )
 
         add_event(
@@ -683,10 +755,9 @@ def run_phase(phase):
         )
 
         add_event(
-            "System entered TARGET HOLD state."
+            "System entered TARGET HOLD."
         )
 
-        # Make final graph point exactly equal to target
         st.session_state.chamber_history[-1] = target
 
         return True
@@ -698,51 +769,56 @@ def run_phase(phase):
 # HEADER
 # ============================================================
 
-st.markdown("""
-<div class="header">
+st.markdown(
+    """
+    <div class="header">
 
-    <div class="header-title">
-        ❄ NiTi ELASTOCALORIC REFRIGERATION
+        <div class="header-title">
+            ❄ NiTi ELASTOCALORIC REFRIGERATION
+        </div>
+
+        <div class="header-subtitle">
+            Advanced Elastocaloric Refrigeration Using NiTi Alloy
+            &nbsp; | &nbsp;
+            RESEARCH SCADA / HMI
+        </div>
+
+        <div class="online">
+            ● CONTROLLER ONLINE
+        </div>
+
     </div>
-
-    <div class="header-subtitle">
-        Advanced Elastocaloric Refrigeration Using NiTi Alloy
-        &nbsp; | &nbsp;
-        RESEARCH SCADA / HMI
-    </div>
-
-    <div class="online">
-        ● CONTROLLER ONLINE
-    </div>
-
-</div>
-""", unsafe_allow_html=True)
+    """,
+    unsafe_allow_html=True
+)
 
 
 # ============================================================
-# TOP STATUS
+# GLOBAL STATUS
 # ============================================================
 
 if st.session_state.target_reached:
 
     st.success(
-        f"🎯 TARGET ACHIEVED — Chamber temperature reached "
-        f"{target:.1f} °C. Automatic cycling is stopped and "
-        f"the system is holding the target condition."
+        f"🎯 TARGET ACHIEVED — Chamber temperature "
+        f"{st.session_state.chamber_temp:.1f} °C | "
+        f"Automatic cycling stopped."
+    )
+
+elif st.session_state.automatic:
+
+    st.info(
+        f"● AUTOMATIC RUNNING | "
+        f"Target: {target:.1f} °C | "
+        f"Chamber: "
+        f"{st.session_state.chamber_temp:.1f} °C"
     )
 
 else:
 
-    if mode == "Automatic":
-        status_text = "AUTOMATIC MODE"
-    else:
-        status_text = "MANUAL MODE"
-
     st.info(
-        f"● {status_text}  |  "
-        f"Target: {target:.1f} °C  |  "
-        f"Current Chamber: "
-        f"{st.session_state.chamber_temp:.1f} °C"
+        f"● {mode.upper()} MODE | "
+        f"Controller Ready"
     )
 
 
@@ -757,83 +833,139 @@ st.markdown(
 
 c1, c2, c3, c4, c5, c6 = st.columns(6)
 
+
 with c1:
+
     st.markdown(
         f"""
         <div class="status-card">
-            <div class="card-label">Material</div>
-            <div class="card-value" style="font-size:20px">
+
+            <div class="card-label">
+                Material
+            </div>
+
+            <div class="card-value"
+                 style="font-size:19px;">
                 {material}
             </div>
+
         </div>
         """,
         unsafe_allow_html=True
     )
+
 
 with c2:
+
     st.markdown(
         f"""
         <div class="status-card">
-            <div class="card-label">Geometry</div>
-            <div class="card-value" style="font-size:18px">
+
+            <div class="card-label">
+                Geometry
+            </div>
+
+            <div class="card-value"
+                 style="font-size:17px;">
                 {geometry}
             </div>
+
         </div>
         """,
         unsafe_allow_html=True
     )
 
+
 with c3:
+
     st.markdown(
         f"""
         <div class="status-card">
-            <div class="card-label">Elements</div>
+
+            <div class="card-label">
+                Active Elements
+            </div>
+
             <div class="card-value">
                 {elements}
             </div>
-            <div class="card-unit">ACTIVE</div>
+
+            <div class="card-unit">
+                ACTIVE
+            </div>
+
         </div>
         """,
         unsafe_allow_html=True
     )
 
+
 with c4:
+
     st.markdown(
         f"""
         <div class="status-card">
-            <div class="card-label">Diameter</div>
+
+            <div class="card-label">
+                Diameter
+            </div>
+
             <div class="card-value">
                 {outer_diameter:g}
             </div>
-            <div class="card-unit">mm OD</div>
+
+            <div class="card-unit">
+                mm OD
+            </div>
+
         </div>
         """,
         unsafe_allow_html=True
     )
 
+
 with c5:
+
     st.markdown(
         f"""
         <div class="status-card">
-            <div class="card-label">Length</div>
+
+            <div class="card-label">
+                Length
+            </div>
+
             <div class="card-value">
                 {length}
             </div>
-            <div class="card-unit">mm</div>
+
+            <div class="card-unit">
+                mm
+            </div>
+
         </div>
         """,
         unsafe_allow_html=True
     )
 
+
 with c6:
+
     st.markdown(
         f"""
         <div class="status-card">
-            <div class="card-label">Maximum Strain</div>
+
+            <div class="card-label">
+                Maximum Strain
+            </div>
+
             <div class="card-value">
                 {max_strain:g}
             </div>
-            <div class="card-unit">%</div>
+
+            <div class="card-unit">
+                %
+            </div>
+
         </div>
         """,
         unsafe_allow_html=True
@@ -841,7 +973,7 @@ with c6:
 
 
 # ============================================================
-# MASTER CONTROLS
+# MASTER CONTROL
 # ============================================================
 
 st.markdown(
@@ -849,9 +981,10 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-control1, control2, control3, control4 = st.columns(4)
+b1, b2, b3, b4 = st.columns(4)
 
-with control1:
+
+with b1:
 
     if mode == "Automatic":
 
@@ -867,6 +1000,7 @@ with control1:
                     st.session_state.automatic = True
 
                     if st.session_state.stage == 0:
+
                         st.session_state.stage = 1
 
                     add_event(
@@ -885,13 +1019,17 @@ with control1:
                 st.session_state.automatic = False
 
                 add_event(
-                    "Automatic cycling paused."
+                    "Automatic operation paused."
                 )
 
                 st.rerun()
 
+    else:
 
-with control2:
+        st.write("Manual operation")
+
+
+with b2:
 
     if st.button(
         "⏹ STOP",
@@ -907,7 +1045,7 @@ with control2:
         st.rerun()
 
 
-with control3:
+with b3:
 
     if st.button(
         "🔄 RESET",
@@ -916,6 +1054,7 @@ with control3:
 
         st.session_state.stage = 0
         st.session_state.cycle_count = 0
+
         st.session_state.automatic = False
         st.session_state.target_reached = False
 
@@ -927,7 +1066,10 @@ with control3:
         st.session_state.strain = 0
         st.session_state.cop = 0
 
-        st.session_state.time = 0
+        st.session_state.simulation_time = 0
+
+        st.session_state.message = "SYSTEM READY"
+
         st.session_state.events = []
 
         st.session_state.temperature_time = [0]
@@ -938,31 +1080,31 @@ with control3:
         st.session_state.stress_history = [0]
         st.session_state.strain_history = [0]
 
-        st.session_state.message = "SYSTEM RESET"
-
         st.rerun()
 
 
-with control4:
+with b4:
 
-    state = (
-        "TARGET HOLD"
-        if st.session_state.target_reached
-        else
-        "RUNNING"
-        if st.session_state.automatic
-        else
-        "READY"
-    )
+    if st.session_state.target_reached:
+
+        controller_state = "TARGET HOLD"
+
+    elif st.session_state.automatic:
+
+        controller_state = "RUNNING"
+
+    else:
+
+        controller_state = "READY"
 
     st.metric(
         "CONTROLLER STATE",
-        state
+        controller_state
     )
 
 
 # ============================================================
-# TARGET ACHIEVED MESSAGE
+# TARGET ACHIEVED
 # ============================================================
 
 if st.session_state.target_reached:
@@ -970,15 +1112,24 @@ if st.session_state.target_reached:
     st.markdown(
         f"""
         <div class="target-achieved">
-            🎯 TARGET TEMPERATURE ACHIEVED<br><br>
+
+            🎯 TARGET TEMPERATURE ACHIEVED
+
+            <br><br>
+
             Chamber Temperature:
             {st.session_state.chamber_temp:.1f} °C
+
             &nbsp;&nbsp; | &nbsp;&nbsp;
+
             Target:
             {target:.1f} °C
+
             <br><br>
-            Automatic cycling has been stopped.
-            No new cycle will start until the controller is reset.
+
+            Automatic cycling has stopped.
+            No new cycle will start until RESET.
+
         </div>
         """,
         unsafe_allow_html=True
@@ -994,19 +1145,19 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-current_stage = st.session_state.stage
+if current_stage := st.session_state.stage:
 
-if current_stage == 0:
-
-    current_operation = "SYSTEM READY"
-    current_description = (
-        "Select Manual or Automatic operation to begin."
-    )
+    current_operation = PHASES[current_stage]["name"]
+    current_icon = PHASES[current_stage]["icon"]
+    current_description = PHASES[current_stage]["description"]
 
 else:
 
-    current_operation = PHASES[current_stage]["name"]
-    current_description = PHASES[current_stage]["description"]
+    current_operation = "SYSTEM READY"
+    current_icon = "●"
+    current_description = (
+        "Select Manual or Automatic operation to begin."
+    )
 
 
 st.markdown(
@@ -1014,8 +1165,7 @@ st.markdown(
     <div class="operation">
 
         <h3>
-            {PHASES[current_stage]["icon"]
-             if current_stage in PHASES else "●"}
+            {current_icon}
             &nbsp; {current_operation}
         </h3>
 
@@ -1026,6 +1176,9 @@ st.markdown(
         <strong>
             Controller Message:
         </strong>
+
+        &nbsp;
+
         {st.session_state.message}
 
     </div>
@@ -1045,62 +1198,47 @@ st.markdown(
 
 phase_columns = st.columns(4)
 
+current_stage = st.session_state.stage
+
 for index, phase_number in enumerate([1, 2, 3, 4]):
 
     with phase_columns[index]:
 
-        if st.session_state.target_reached:
-
-            css_class = (
-                "phase-complete"
-                if phase_number <= current_stage
-                else "phase-pending"
-            )
-
-        elif phase_number == current_stage:
+        if phase_number == current_stage:
 
             css_class = "phase-current"
+            status = "● CURRENT"
 
         elif phase_number < current_stage:
 
             css_class = "phase-complete"
+            status = "✓ COMPLETE"
 
         else:
 
             css_class = "phase-pending"
-
-        status = ""
-
-        if phase_number == current_stage:
-            status = "● CURRENT"
-
-        elif phase_number < current_stage:
-            status = "✓ COMPLETE"
-
-        else:
             status = "○ PENDING"
 
         st.markdown(
             f"""
             <div class="phase {css_class}">
 
-                <div style="font-size:24px">
+                <div class="phase-icon">
                     {PHASES[phase_number]["icon"]}
                 </div>
 
                 <div class="phase-title">
-                    {phase_number}. {PHASES[phase_number]["name"]}
+                    {phase_number}.
+                    {PHASES[phase_number]["name"]}
                 </div>
 
                 <div class="phase-description">
                     {PHASES[phase_number]["description"]}
                 </div>
 
-                <br>
-
-                <strong>
+                <div class="phase-status">
                     {status}
-                </strong>
+                </div>
 
             </div>
             """,
@@ -1119,26 +1257,34 @@ st.markdown(
 
 t1, t2, t3, t4 = st.columns(4)
 
+
 with t1:
+
     st.metric(
         "CHAMBER TEMPERATURE",
         f"{st.session_state.chamber_temp:.2f} °C",
         f"Target {target:.1f} °C"
     )
 
+
 with t2:
+
     st.metric(
         "NiTi TEMPERATURE",
         f"{st.session_state.niti_temp:.2f} °C"
     )
 
+
 with t3:
+
     st.metric(
         "AIR TEMPERATURE",
         f"{st.session_state.air_temp:.2f} °C"
     )
 
+
 with t4:
+
     st.metric(
         "AMBIENT",
         f"{ambient:.2f} °C"
@@ -1156,25 +1302,33 @@ st.markdown(
 
 m1, m2, m3, m4 = st.columns(4)
 
+
 with m1:
+
     st.metric(
         "STRESS",
         f"{st.session_state.stress:.1f} MPa"
     )
 
+
 with m2:
+
     st.metric(
         "STRAIN",
         f"{st.session_state.strain:.2f} %"
     )
 
+
 with m3:
+
     st.metric(
         "CYCLES",
-        f"{st.session_state.cycle_count}"
+        str(st.session_state.cycle_count)
     )
 
+
 with m4:
+
     st.metric(
         "EST. COP",
         f"{st.session_state.cop:.3f}"
@@ -1190,18 +1344,25 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-e1, e2, e3, e4, e5 = st.columns(5)
+equipment_columns = st.columns(5)
 
 equipment = [
+
     ("LOAD ACTUATOR", "ONLINE"),
+
     ("LINEAR GUIDE", "ONLINE"),
+
     ("FORCED AIR", f"{airflow} CFM"),
+
     ("TEMPERATURE SENSOR", "ONLINE"),
+
     ("CHAMBER", "SEALED")
+
 ]
 
+
 for col, (name, status) in zip(
-    [e1, e2, e3, e4, e5],
+    equipment_columns,
     equipment
 ):
 
@@ -1220,7 +1381,9 @@ for col, (name, status) in zip(
                     font-weight:800;
                     color:#198754;
                 ">
+
                     ● {status}
+
                 </div>
 
             </div>
@@ -1230,7 +1393,7 @@ for col, (name, status) in zip(
 
 
 # ============================================================
-# MANUAL CONTROLS
+# MANUAL CONTROL
 # ============================================================
 
 if mode == "Manual":
@@ -1240,10 +1403,10 @@ if mode == "Manual":
         unsafe_allow_html=True
     )
 
-    b1, b2, b3, b4 = st.columns(4)
+    manual_columns = st.columns(4)
 
     for col, phase_number in zip(
-        [b1, b2, b3, b4],
+        manual_columns,
         [1, 2, 3, 4]
     ):
 
@@ -1278,9 +1441,11 @@ if mode == "Manual":
 # ============================================================
 
 if (
+
     mode == "Automatic"
     and st.session_state.automatic
     and not st.session_state.target_reached
+
 ):
 
     current_phase = st.session_state.stage
@@ -1288,6 +1453,7 @@ if (
     if current_phase == 0:
 
         st.session_state.stage = 1
+
         st.rerun()
 
     else:
@@ -1331,7 +1497,7 @@ if (
 
 
 # ============================================================
-# LIVE THERMAL GRAPH
+# THERMAL GRAPH
 # ============================================================
 
 st.markdown(
@@ -1340,10 +1506,15 @@ st.markdown(
 )
 
 lengths = [
+
     len(st.session_state.temperature_time),
+
     len(st.session_state.chamber_history),
+
     len(st.session_state.niti_history),
+
     len(st.session_state.air_history)
+
 ]
 
 n = min(lengths)
@@ -1363,6 +1534,7 @@ niti = np.asarray(
 air = np.asarray(
     st.session_state.air_history[-n:]
 )
+
 
 fig, ax = plt.subplots(
     figsize=(12, 4.5)
@@ -1432,19 +1604,29 @@ st.markdown(
 )
 
 mechanical_lengths = [
+
     len(st.session_state.stress_history),
+
     len(st.session_state.strain_history)
+
 ]
 
-m = min(mechanical_lengths)
+n_mechanical = min(
+    mechanical_lengths
+)
 
 strain_data = np.asarray(
-    st.session_state.strain_history[-m:]
+    st.session_state.strain_history[
+        -n_mechanical:
+    ]
 )
 
 stress_data = np.asarray(
-    st.session_state.stress_history[-m:]
+    st.session_state.stress_history[
+        -n_mechanical:
+    ]
 )
+
 
 fig2, ax2 = plt.subplots(
     figsize=(12, 4.5)
@@ -1466,7 +1648,7 @@ ax2.set_ylabel(
 )
 
 ax2.set_title(
-    "NiTi Mechanical Condition"
+    "NiTi Mechanical Response"
 )
 
 ax2.grid(
@@ -1494,7 +1676,8 @@ if st.session_state.events:
 
     event_df = pd.DataFrame(
         {
-            "EVENT": st.session_state.events
+            "EVENT":
+                st.session_state.events
         }
     )
 
@@ -1520,52 +1703,61 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-summary = pd.DataFrame(
-    {
-        "Parameter": [
-            "Material",
-            "Geometry",
-            "Active Elements",
-            "Active Length",
-            "Outer Diameter",
-            "Inner Diameter",
-            "Maximum Strain",
-            "Actuation",
-            "Airflow",
-            "Ambient Temperature",
-            "Target Temperature",
-            "Operating Mode",
-            "Cycle Count",
-            "Controller State"
-        ],
+if st.session_state.target_reached:
 
-        "Value": [
-            material,
-            geometry,
-            elements,
-            f"{length} mm",
-            f"{outer_diameter:g} mm",
-            f"{inner_diameter:g} mm",
-            f"{max_strain:g} %",
-            actuation,
-            f"{airflow} CFM",
-            f"{ambient:.1f} °C",
-            f"{target:.1f} °C",
-            mode,
-            st.session_state.cycle_count,
+    controller_state = "TARGET HOLD"
 
-            (
-                "TARGET HOLD"
-                if st.session_state.target_reached
-                else
-                "AUTOMATIC RUN"
-                if st.session_state.automatic
-                else
-                "READY"
-            )
-        ]
-    }
-)
+elif st.session_state.automatic:
+
+    controller_state = "AUTOMATIC RUNNING"
+
+else:
+
+    controller_state = "READY"
+
+
+summary = pd.DataFrame({
+
+    "PARAMETER": [
+
+        "Material",
+        "Geometry",
+        "Active Elements",
+        "Active Length",
+        "Outer Diameter",
+        "Inner Diameter",
+        "Maximum Strain",
+        "Actuation",
+        "Forced Airflow",
+        "Ambient Temperature",
+        "Target Temperature",
+        "Operating Mode",
+        "Cycle Count",
+        "Controller State"
+
+    ],
+
+    "VALUE": [
+
+        material,
+        geometry,
+        elements,
+        f"{length} mm",
+        f"{outer_diameter:g} mm",
+        f"{inner_diameter:g} mm",
+        f"{max_strain:g} %",
+        actuation,
+        f"{airflow} CFM",
+        f"{ambient:.1f} °C",
+        f"{target:.1f} °C",
+        mode,
+        st.session_state.cycle_count,
+        controller_state
+
+    ]
+
+})
+
 
 st.dataframe(
     summary,
@@ -1582,14 +1774,25 @@ st.markdown(
     """
     <div class="target-box">
 
-        <strong>Research / Simulation Notice</strong><br>
+        <strong>
+            RESEARCH / SIMULATION NOTICE
+        </strong>
 
-        This SCADA/HMI interface is a research-oriented
-        simulation and visualization model for the
-        Advanced Elastocaloric Refrigeration Using NiTi Alloy
-        project. Temperature, stress, strain and COP values
-        are model-generated estimates and should not be treated
-        as experimentally validated measurements.
+        <br><br>
+
+        This SCADA/HMI interface is a
+        research-oriented simulation and visualization
+        model for the project
+        <strong>
+            Advanced Elastocaloric Refrigeration Using NiTi Alloy
+        </strong>.
+
+        <br><br>
+
+        Temperature, stress, strain and COP values
+        shown by this interface are model-generated
+        estimates and should not be interpreted as
+        experimentally validated measurements.
 
     </div>
     """,
@@ -1605,10 +1808,15 @@ st.markdown(
     """
     <div class="footer">
 
-        NiTi Elastocaloric Refrigeration SCADA / HMI
+        NiTi Elastocaloric Refrigeration
+        SCADA / HMI
+
         <br>
+
         Advanced Elastocaloric Refrigeration Using NiTi Alloy
+
         <br>
+
         Mechanical Engineering Research Interface
 
     </div>
