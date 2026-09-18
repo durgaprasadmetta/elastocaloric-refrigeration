@@ -151,25 +151,25 @@ with tab1:
         if st.session_state.current_stage_idx == 1:
             st.success("🔥 **STAGE 1 ACTIVE**\n\nTensile Loading Core")
         else:
-            st.markdown("<div style='opacity: 0.4; padding:10px; border:1px solid gray;'>Stage 1: Tension Load</div>", unsafe_allowed_html=True)
+            st.info("Stage 1: Tension Load")
             
     with m_col2:
         if st.session_state.current_stage_idx == 2:
             st.success("💨 **STAGE 2 ACTIVE**\n\nWarm Air Heat Exhaust")
         else:
-            st.markdown("<div style='opacity: 0.4; padding:10px; border:1px solid gray;'>Stage 2: Warm Exhaust</div>", unsafe_allowed_html=True)
+            st.info("Stage 2: Warm Exhaust")
             
     with m_col3:
         if st.session_state.current_stage_idx == 3:
-            st.info("❄️ **STAGE 3 ACTIVE**\n\nCore Release Relaxation")
+            st.success("❄️ **STAGE 3 ACTIVE**\n\nCore Release Relaxation")
         else:
-            st.markdown("<div style='opacity: 0.4; padding:10px; border:1px solid gray;'>Stage 3: Tensile Unload</div>", unsafe_allowed_html=True)
+            st.info("Stage 3: Tensile Unload")
             
     with m_col4:
         if st.session_state.current_stage_idx == 4:
-            st.info("🥶 **STAGE 4 ACTIVE**\n\nChilled Air Vault Circulation")
+            st.success("🥶 **STAGE 4 ACTIVE**\n\nChilled Air Vault Circulation")
         else:
-            st.markdown("<div style='opacity: 0.4; padding:10px; border:1px solid gray;'>Stage 4: Cold Circulation</div>", unsafe_allowed_html=True)
+            st.info("Stage 4: Cold Circulation")
 
     st.markdown("---")
 
@@ -203,3 +203,8 @@ with tab1:
             st.markdown("---")
             st.markdown("**Enclosed Internal Manifold Air Streams**")
             col_a1, col_b2 = st.columns(2)
+            col_a1.metric(label="Enclosed Air Max Temp", value=f"{st.session_state.air_max_temp:.1f} °C")
+            col_b2.metric(label="Enclosed Air Min Temp", value=f"{st.session_state.air_min_temp:.1f} °C")
+            st.caption(f"Surrounding Lab Environment Temperature Baseline: {ambient_temp:.1f} °C")
+
+    with col_f3:
