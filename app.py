@@ -208,3 +208,4 @@ with tab1:
             st.caption(f"Surrounding Lab Environment Temperature Baseline: {ambient_temp:.1f} °C")
 
     with col_f3:
+        st.markdown("#### 🎮 Operator Automation Console")
