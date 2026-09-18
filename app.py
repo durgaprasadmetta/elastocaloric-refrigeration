@@ -18,7 +18,7 @@ if "chamber_temp" not in st.session_state:
 if "temp_history" not in st.session_state:
     st.session_state.temp_history = [25.0]
 if "current_stage_idx" not in st.session_state:
-    st.session_state.current_stage_idx = 0  # 0: Idle, 1: Load, 2: Dwell, 3: Unload, 4: Blow
+    st.session_state.current_stage_idx = 0  
 
 # Expanded Multi-Node Thermal State Variables
 if "wire_max_temp" not in st.session_state:
@@ -95,53 +95,44 @@ def execute_step_physics(stage_idx):
     st.session_state.current_stage_idx = stage_idx
     mass_factor = (num_wires / 5.0) * (wire_len / 150.0)
     
-    # Latent heat temperature spikes calculated dynamically based on material selection
     latent_delta = 12.5 * (strain_limit / 5.0)
     
-    if stage_idx == 1: # LOADING
+    if stage_idx == 1: 
         st.session_state.strain = strain_limit
         st.session_state.stress = 450.0 + (strain_limit * 12)
         st.session_state.fan_1 = "STANDBY [OFF]"
         st.session_state.fan_2 = "STANDBY [OFF]"
-        
-        # Wire temperature spikes adiabatically
         st.session_state.wire_max_temp = ambient_temp + latent_delta
         st.session_state.air_max_temp = ambient_temp + (latent_delta * 0.4)
         
-    elif stage_idx == 2: # EXHAUST DWELL
+    elif stage_idx == 2: 
         st.session_state.strain = strain_limit
         st.session_state.stress = 410.0
         st.session_state.fan_1 = f"ACTIVE BLOWING [{fan_flow} CFM]"
         st.session_state.fan_2 = "STANDBY [OFF]"
-        
-        # Convective cooling vents out the wire heat to ambient levels
         cooling_efficiency = (fan_flow / 100.0)
         st.session_state.wire_max_temp -= (st.session_state.wire_max_temp - ambient_temp) * cooling_efficiency
         st.session_state.air_max_temp -= (st.session_state.air_max_temp - ambient_temp) * cooling_efficiency
         
-    elif stage_idx == 3: # UNLOADING
+    elif stage_idx == 3: 
         st.session_state.strain = 0.0
         st.session_state.stress = 120.0
         st.session_state.fan_1 = "STANDBY [OFF]"
         st.session_state.fan_2 = "STANDBY [OFF]"
-        
-        # Wire snaps back dropping temperature below zero point limits
         st.session_state.wire_min_temp = ambient_temp - latent_delta
         st.session_state.air_min_temp = ambient_temp - (latent_delta * 0.5)
         
-    elif stage_idx == 4: # COLD CIRCULATION
+    elif stage_idx == 4: 
         st.session_state.strain = 0.0
         st.session_state.stress = 0.0
         st.session_state.fan_1 = "STANDBY [OFF]"
         st.session_state.fan_2 = f"ACTIVE CHILLING [{fan_flow} CFM]"
         
-        # Thermodynamic extraction steps pushing into insulated chamber vault box
         insulation_coeff = 1.0 if insulation_loss == "Standard Double-Wall Vacuum Insulated" else (1.4 if insulation_loss == "High Grade Polyurethane Foam" else 0.5)
         if st.session_state.chamber_temp > target_limit:
             efficiency_scalar = 0.05 * (2.0 / wire_dia) * (fan_flow / 50.0) * mass_factor * insulation_coeff
             st.session_state.chamber_temp -= (st.session_state.chamber_temp - target_limit) * efficiency_scalar
         
-        # Adjust boundary parameters for surrounded manifold air streams
         st.session_state.air_min_temp = min(st.session_state.air_min_temp, st.session_state.chamber_temp)
         st.session_state.wire_min_temp = min(st.session_state.wire_min_temp, st.session_state.chamber_temp - 2.0)
         
@@ -151,9 +142,8 @@ def execute_step_physics(stage_idx):
             
         st.session_state.cop = abs((ambient_temp - st.session_state.chamber_temp) / (strain_limit * 0.4 + 0.1))
 
-# ================= TAB 1: FRONT-END presentation =================
+# ================= TAB 1: FRONT-END PRESENTATION =================
 with tab1:
-    # 🎚️ HIGH-CONTRAST STEP AUTOMATION SEQUENCE MATRIX
     st.markdown("### 🚦 Loop Controller Phase Status Matrix")
     m_col1, m_col2, m_col3, m_col4 = st.columns(4)
     
@@ -199,3 +189,17 @@ with tab1:
                 label="Chamber Core Temperature (T_ch)", 
                 value=f"{st.session_state.chamber_temp:.1f} °C", 
                 delta=f"Target: {target_limit:.1f} °C",
+                delta_color="inverse"
+            )
+
+    with col_f2:
+        st.markdown("#### 🌡️ Multi-Node Expert Thermal Grid")
+        with st.container(border=True):
+            st.markdown("**Active Shape Memory Core Wires**")
+            col_w1, col_w2 = st.columns(2)
+            col_w1.metric(label="Wire Peak Max Temp", value=f"{st.session_state.wire_max_temp:.1f} °C")
+            col_w2.metric(label="Wire Minimum Cold Temp", value=f"{st.session_state.wire_min_temp:.1f} °C")
+            
+            st.markdown("---")
+            st.markdown("**Enclosed Internal Manifold Air Streams**")
+            col_a1, col_b2 = st.columns(2)
