@@ -20,7 +20,7 @@ if "temp_history" not in st.session_state:
 if "current_stage_idx" not in st.session_state:
     st.session_state.current_stage_idx = 0  
 
-# Expanded Multi-Node Thermal State Variables
+# All Multi-Node Expert Thermal State Variables Active
 if "wire_max_temp" not in st.session_state:
     st.session_state.wire_max_temp = 25.0
 if "wire_min_temp" not in st.session_state:
@@ -32,7 +32,7 @@ if "air_min_temp" not in st.session_state:
 if "ambient_air_temp" not in st.session_state:
     st.session_state.ambient_air_temp = 25.0
 
-# Mechanical Tracking
+# Mechanical Tracking Array
 if "stress" not in st.session_state:
     st.session_state.stress = 0.0
 if "strain" not in st.session_state:
@@ -94,7 +94,6 @@ mode = st.sidebar.radio("Select Operational Architecture:", ["Manual Diagnostics
 def execute_step_physics(stage_idx):
     st.session_state.current_stage_idx = stage_idx
     mass_factor = (num_wires / 5.0) * (wire_len / 150.0)
-    
     latent_delta = 12.5 * (strain_limit / 5.0)
     
     if stage_idx == 1: 
@@ -144,68 +143,70 @@ def execute_step_physics(stage_idx):
 
 # ================= TAB 1: FRONT-END PRESENTATION =================
 with tab1:
+    # --- MASTER SYSTEM OVERRIDES PANEL ---
+    st.markdown("### 🎚️ Master Control Panel Overrides")
+    ctrl_col1, ctrl_col2, ctrl_col3 = st.columns(3)
+    
+    with ctrl_col1:
+        if mode == "Automated Cycling Loop":
+            if not st.session_state.auto_running:
+                if st.button("🚀 Start Continuous Sequence", type="primary", use_container_width=True):
+                    st.session_state.auto_running = True
+                    st.rerun()
+            else:
+                if st.button("🛑 Halt Sequence Loop", type="secondary", use_container_width=True):
+                    st.session_state.auto_running = False
+                    st.rerun()
+        else:
+            st.markdown("**Manual Operations Active** *(Use triggers below)*")
+            
+    with ctrl_col2:
+        if st.button("🔄 Reset System Metrics (Master Reset)", type="secondary", use_container_width=True):
+            st.session_state.cycle_count = 0
+            st.session_state.chamber_temp = ambient_temp
+            st.session_state.temp_history = [ambient_temp]
+            st.session_state.wire_max_temp = ambient_temp
+            st.session_state.wire_min_temp = ambient_temp
+            st.session_state.air_max_temp = ambient_temp
+            st.session_state.air_min_temp = ambient_temp
+            st.session_state.stress = 0.0
+            st.session_state.strain = 0.0
+            st.session_state.cop = 0.0
+            st.session_state.auto_running = False
+            st.session_state.current_stage_idx = 0
+            st.rerun()
+            
+    with ctrl_col3:
+        st.info(f"**Selected Mode:** {mode}")
+
+    st.markdown("---")
     st.markdown("### 🚦 Loop Controller Phase Status Matrix")
     m_col1, m_col2, m_col3, m_col4 = st.columns(4)
     
     with m_col1:
         if st.session_state.current_stage_idx == 1:
             st.success("🔥 **STAGE 1 ACTIVE**\n\nTensile Loading Core")
-        else:
-            st.info("Stage 1: Tension Load")
+        else: st.info("Stage 1: Tension Load")
             
     with m_col2:
         if st.session_state.current_stage_idx == 2:
             st.success("💨 **STAGE 2 ACTIVE**\n\nWarm Air Heat Exhaust")
-        else:
-            st.info("Stage 2: Warm Exhaust")
+        else: st.info("Stage 2: Warm Exhaust")
             
     with m_col3:
         if st.session_state.current_stage_idx == 3:
             st.success("❄️ **STAGE 3 ACTIVE**\n\nCore Release Relaxation")
-        else:
-            st.info("Stage 3: Tensile Unload")
+        else: st.info("Stage 3: Tensile Unload")
             
     with m_col4:
         if st.session_state.current_stage_idx == 4:
             st.success("🥶 **STAGE 4 ACTIVE**\n\nChilled Air Vault Circulation")
-        else:
-            st.info("Stage 4: Cold Circulation")
+        else: st.info("Stage 4: Cold Circulation")
 
     st.markdown("---")
-
     col_f1, col_f2, col_f3 = st.columns(3)
     
     with col_f1:
         st.markdown("#### 🏢 Active Real-Time Mechanism")
         with st.container(border=True):
             st.markdown("**Core Bundle Pulling Stroke Mechanics**")
-            stretch_pct = int((st.session_state.strain / 8.0) * 100)
-            st.progress(min(100, max(0, stretch_pct)))
-            st.markdown(f"Applied Load Stress (σ): `{st.session_state.stress:.1f} MPa` | Strain (ε): `{st.session_state.strain:.1f} %`")
-            
-            st.markdown("---")
-            st.markdown("**Isolated Deep Freeze Vault Target Box**")
-            st.metric(
-                label="Chamber Core Temperature (T_ch)", 
-                value=f"{st.session_state.chamber_temp:.1f} °C", 
-                delta=f"Target: {target_limit:.1f} °C",
-                delta_color="inverse"
-            )
-
-    with col_f2:
-        st.markdown("#### 🌡️ Multi-Node Expert Thermal Grid")
-        with st.container(border=True):
-            st.markdown("**Active Shape Memory Core Wires**")
-            col_w1, col_w2 = st.columns(2)
-            col_w1.metric(label="Wire Peak Max Temp", value=f"{st.session_state.wire_max_temp:.1f} °C")
-            col_w2.metric(label="Wire Minimum Cold Temp", value=f"{st.session_state.wire_min_temp:.1f} °C")
-            
-            st.markdown("---")
-            st.markdown("**Enclosed Internal Manifold Air Streams**")
-            col_a1, col_b2 = st.columns(2)
-            col_a1.metric(label="Enclosed Air Max Temp", value=f"{st.session_state.air_max_temp:.1f} °C")
-            col_b2.metric(label="Enclosed Air Min Temp", value=f"{st.session_state.air_min_temp:.1f} °C")
-            st.caption(f"Surrounding Lab Environment Temperature Baseline: {ambient_temp:.1f} °C")
-
-    with col_f3:
-        st.markdown("#### 🎮 Operator Automation Console")
