@@ -5,7 +5,7 @@ import time
 
 # Professional Page Layout Configuration
 st.set_page_config(
-    page_title="Industrial Elastocaloric Control Center", 
+    page_title="Elastocaloric Advanced Simulation Center", 
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -20,7 +20,7 @@ if "temp_history" not in st.session_state:
 if "current_stage_idx" not in st.session_state:
     st.session_state.current_stage_idx = 0  
 
-# All Multi-Node Expert Thermal State Variables Present
+# Expanded Multi-Node Thermal State Variables
 if "wire_max_temp" not in st.session_state:
     st.session_state.wire_max_temp = 25.0
 if "wire_min_temp" not in st.session_state:
@@ -29,8 +29,10 @@ if "air_max_temp" not in st.session_state:
     st.session_state.air_max_temp = 25.0
 if "air_min_temp" not in st.session_state:
     st.session_state.air_min_temp = 25.0
+if "ambient_air_temp" not in st.session_state:
+    st.session_state.ambient_air_temp = 25.0
 
-# Mechanical Metrics & Toggles
+# Mechanical Tracking
 if "stress" not in st.session_state:
     st.session_state.stress = 0.0
 if "strain" not in st.session_state:
@@ -76,9 +78,10 @@ if st.session_state.cycle_count == 0 and len(st.session_state.temp_history) == 1
     st.session_state.wire_min_temp = ambient_temp
     st.session_state.air_max_temp = ambient_temp
     st.session_state.air_min_temp = ambient_temp
+    st.session_state.ambient_air_temp = ambient_temp
 
 # ================= SIDEBAR QUICK OVERRIDES =================
-st.sidebar.header("🕹️ RUN PARAMETERS")
+st.sidebar.header("🕹️ CONTROL RUN TIME")
 st.sidebar.markdown("---")
 strain_limit = st.sidebar.slider("Peak Tensile Strain Bounds (ε):", 2.0, 8.0, 5.0, step=0.5, format="%.1f %%")
 cycle_speed = st.sidebar.slider("Automation Loop Delay Spacing (seconds):", 0.2, 3.0, 0.8, step=0.1, format="%.1f sec/phase")
@@ -93,7 +96,7 @@ def execute_step_physics(stage_idx):
     mass_factor = (num_wires / 5.0) * (wire_len / 150.0)
     latent_delta = 12.5 * (strain_limit / 5.0)
     
-    if stage_idx == 1: # STAGE 1: TENSILE LOADING
+    if stage_idx == 1: 
         st.session_state.strain = strain_limit
         st.session_state.stress = 450.0 + (strain_limit * 12)
         st.session_state.fan_1 = "STANDBY [OFF]"
@@ -101,7 +104,7 @@ def execute_step_physics(stage_idx):
         st.session_state.wire_max_temp = ambient_temp + latent_delta
         st.session_state.air_max_temp = ambient_temp + (latent_delta * 0.4)
         
-    elif stage_idx == 2: # STAGE 2: HEAT EXHAUST BLOW
+    elif stage_idx == 2: 
         st.session_state.strain = strain_limit
         st.session_state.stress = 410.0
         st.session_state.fan_1 = f"ACTIVE BLOWING [{fan_flow} CFM]"
@@ -110,7 +113,7 @@ def execute_step_physics(stage_idx):
         st.session_state.wire_max_temp -= (st.session_state.wire_max_temp - ambient_temp) * cooling_efficiency
         st.session_state.air_max_temp -= (st.session_state.air_max_temp - ambient_temp) * cooling_efficiency
         
-    elif stage_idx == 3: # STAGE 3: CORE UNLOADING
+    elif stage_idx == 3: 
         st.session_state.strain = 0.0
         st.session_state.stress = 120.0
         st.session_state.fan_1 = "STANDBY [OFF]"
@@ -118,7 +121,7 @@ def execute_step_physics(stage_idx):
         st.session_state.wire_min_temp = ambient_temp - latent_delta
         st.session_state.air_min_temp = ambient_temp - (latent_delta * 0.5)
         
-    elif stage_idx == 4: # STAGE 4: CHILLED VAULT CIRCULATION
+    elif stage_idx == 4: 
         st.session_state.strain = 0.0
         st.session_state.stress = 0.0
         st.session_state.fan_1 = "STANDBY [OFF]"
@@ -140,7 +143,8 @@ def execute_step_physics(stage_idx):
 
 # ================= TAB 1: FRONT-END PRESENTATION =================
 with tab1:
-    st.markdown("### 🎚️ Master Control Panel (Manual & Automation Override)")
+    # --- MASTER SYSTEM OVERRIDES PANEL ---
+    st.markdown("### 🎚 McKay Control Panel Overrides")
     ctrl_col1, ctrl_col2, ctrl_col3 = st.columns(3)
     
     with ctrl_col1:
@@ -154,7 +158,7 @@ with tab1:
                     st.session_state.auto_running = False
                     st.rerun()
         else:
-            st.markdown("**Manual Step Mode Active** *(Use grid triggers below)*")
+            st.markdown("**Manual Operations Active** *(Use triggers below)*")
             
     with ctrl_col2:
         if st.button("🔄 Reset System Metrics (Master Reset)", type="secondary", use_container_width=True):
@@ -173,9 +177,9 @@ with tab1:
             st.rerun()
             
     with ctrl_col3:
-        st.info(f"**Selected Mode:** {mode}")
+        st.info(f"**Current State Matrix Mapping Mode:** {mode}")
 
-    # Process unrolled background loop iteration dynamically
+    # Process execution steps sequentially with time delays when loop is toggled on
     if mode == "Automated Cycling Loop" and st.session_state.auto_running:
         execute_step_physics(1)
         time.sleep(cycle_speed)
@@ -206,4 +210,3 @@ with tab1:
         if st.session_state.current_stage_idx == 3:
             st.success("❄️ **STAGE 3 ACTIVE**\n\nCore Release Relaxation")
         else: st.info("Stage 3: Tensile Unload")
-            
