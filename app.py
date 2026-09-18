@@ -165,7 +165,7 @@ with tab1:
 
     st.markdown("---")
     
-    # ================= ⚡ ANIMATED SCADA PIPING AND STATUS TILES =================
+    # ================= ⚡ ANIMATED SCADA MANIFOLD TRACKING =================
     st.markdown("### 🚦 Live SCADA Flow Manifold Tracking Pane")
     s1, s2, s3, s4 = st.columns(4)
     
@@ -178,7 +178,7 @@ with tab1:
                 st.markdown("⚡ *Latent Heat Packet Released*")
         else:
             with st.status("Phase 1: Actuator Charge", state="complete", expanded=False):
-                st.write("Node Standby")
+                st.write("Node Standby Line Operational")
 
     with s2:
         if st.session_state.current_stage_idx == 2:
@@ -189,7 +189,7 @@ with tab1:
                 st.markdown(f"🍃 *Flushing Core Heat at {fan_flow} CFM*")
         else:
             with st.status("Phase 2: Thermal Exhaust", state="complete", expanded=False):
-                st.write("Node Standby")
+                st.write("Node Standby Line Operational")
 
     with s3:
         if st.session_state.current_stage_idx == 3:
@@ -199,4 +199,3 @@ with tab1:
                 st.markdown("**Circulation Valve:** `CLOSED 🔴`")
                 st.markdown("🧊 *Adiabatic Latent Temperature Plunge*")
         else:
-            with st.status("Phase 3: Actuator Discharge", state="complete", expanded=False):
