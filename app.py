@@ -36,7 +36,7 @@ import streamlit as st
 matplotlib.use("Agg")
 
 # =================================================================
-# PART 1 — PHYSICS CORE  (no Streamlit below this line until PART 2)
+# PART 1 — PHYSICS CORE  (unchanged)
 # =================================================================
 
 CFM_TO_M3S = 4.719474e-4
@@ -52,16 +52,16 @@ PHASE_NAMES = {1: "Load", 2: "Reject heat", 3: "Unload", 4: "Absorb heat"}
 class Material:
     key: str
     name: str
-    rho: float               # kg/m3
-    cp: float                # J/(kg K)
-    ds_tr: float             # J/(kg K)  transformation entropy
-    eps_tr: float            # -         full transformation strain
-    sigma_ref_mpa: float     # MPa       plateau stress at t_ref_c
+    rho: float
+    cp: float
+    ds_tr: float
+    eps_tr: float
+    sigma_ref_mpa: float
     t_ref_c: float
-    cc_slope: float          # MPa/K     Clausius-Clapeyron slope
+    cc_slope: float
     sigma_hyst_mpa: float
     sigma_limit_mpa: float
-    af_c: float              # C         austenite finish
+    af_c: float
     fatigue_cycles: int
 
     def dt_adiabatic(self, t_c: float, eps: float) -> float:
@@ -88,7 +88,7 @@ MATERIALS: Dict[str, Material] = {m.key: m for m in [
 class Exchanger:
     key: str
     name: str
-    h_ref: float             # W/(m2 K) at nominal flow
+    h_ref: float
     liquid: bool
     pump_ref_w: float
 
@@ -236,7 +236,6 @@ def step_phase(cfg: Config, st_in: State, phase: int,
     s = replace(st_in, phase=phase)
     dt = cfg.phase_time_s / substeps
 
-    # --- mechanical step and latent heat ---------------------
     if phase == 1:
         s.strain_pct = cfg.strain_pct
         s.t_element += mat.dt_adiabatic(s.t_element, cfg.strain)
@@ -258,7 +257,6 @@ def step_phase(cfg: Config, st_in: State, phase: int,
     if cfg.mode_compression:
         s.stress_mpa = -abs(s.stress_mpa)
 
-    # --- thermal integration ---------------------------------
     ua_active, ua_off, q_cold = cfg.ua_hx, cfg.ua_idle, 0.0
 
     for _ in range(substeps):
@@ -277,7 +275,6 @@ def step_phase(cfg: Config, st_in: State, phase: int,
                                  ua_off, cfg.capacity, dt)
             s.t_fluid += (cfg.ambient_c - s.t_fluid) * 0.25
 
-        # the cabinet leaks during every phase, not just recovery
         s.t_chamber = _relax(s.t_chamber, cfg.ambient_c,
                              cfg.insulation_ua, cfg.chamber_capacity, dt)
 
@@ -365,98 +362,199 @@ def check_interlocks(cfg: Config, s: State) -> List[Tuple[str, str]]:
 st.set_page_config(page_title="Elastocaloric rig control", page_icon="◆",
                    layout="wide", initial_sidebar_state="expanded")
 
-INK, STEEL, COLD = "#12232E", "#4A6572", "#0E7C9B"
-WARM, GOOD, LINE, PAPER = "#B45309", "#1F7A5A", "#C7D2DB", "#FFFFFF"
+
+def hex_to_rgba(hex_color: str, alpha: float) -> str:
+    h = hex_color.lstrip("#")
+    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    return f"rgba({r},{g},b if False else {b},{alpha})".replace(
+        "b if False else ", "")
+
+
+def hex_to_rgba(hex_color: str, alpha: float) -> str:  # noqa: F811 (final def)
+    h = hex_color.lstrip("#")
+    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    return f"rgba({r},{g},{b},{alpha})"
+
+
+def get_theme(dark: bool) -> dict:
+    if dark:
+        return dict(INK="#E8EEF3", STEEL="#93A5B4", COLD="#35C3E8",
+                    WARM="#F2A65A", GOOD="#4ADE9B", LINE="#2A3B47",
+                    PAPER="#16222B", APP_BG="#0B141A")
+    return dict(INK="#12232E", STEEL="#4A6572", COLD="#0E7C9B",
+               WARM="#B45309", GOOD="#1F7A5A", LINE="#C7D2DB",
+               PAPER="#FFFFFF", APP_BG="#E8EDF1")
+
+
+# ---------------------------------------------------------------
+# Factory defaults for every configuration widget. Used both to
+# seed the app on first load and to power "Restore factory defaults".
+# ---------------------------------------------------------------
+
+DEFAULTS = {
+    "w_theme": False,                # False = light, True = dark
+    "w_material": "niti",
+    "w_form": "tube",
+    "w_n_elements": 5,
+    "w_length": 150.0,
+    "w_od": 12.0,
+    "w_id": 10.0,
+    "w_strain": round(MATERIALS["niti"].eps_tr * 100 * 0.9, 1),
+    "w_compression": False,
+    "w_phase_time": 0.8,
+    "w_eta": 0.70,
+    "w_hx": "finned_air",
+    "w_flow": 50.0,
+    "w_ambient": 25.0,
+    "w_target": 10.0,
+    "w_chamber_cap": 800.0,
+    "w_insulation": 0.35,
+    "w_auto": True,
+    "w_cycles_update": 4,
+}
+
+# If a factory-reset was requested on the previous run, apply it now,
+# BEFORE any widget is instantiated, so every control snaps back.
+if st.session_state.get("_do_restore"):
+    for _k, _v in DEFAULTS.items():
+        st.session_state[_k] = _v
+    st.session_state["_do_restore"] = False
+    st.session_state["_pending_full_reset"] = True
+
+# Seed any missing keys (first load only — setdefault is a no-op after).
+for _k, _v in DEFAULTS.items():
+    st.session_state.setdefault(_k, _v)
+
+
+def style_axes(ax, theme: dict):
+    ax.set_facecolor(theme["PAPER"])
+    ax.figure.patch.set_facecolor(theme["PAPER"])
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    for side in ("left", "bottom"):
+        ax.spines[side].set_color(theme["LINE"])
+    ax.tick_params(colors=theme["STEEL"], labelsize=8)
+    ax.grid(True, color=theme["LINE"], linewidth=0.6, alpha=0.7)
+    ax.set_axisbelow(True)
+    ax.xaxis.label.set_color(theme["STEEL"])
+    ax.yaxis.label.set_color(theme["STEEL"])
+    ax.xaxis.label.set_size(9)
+    ax.yaxis.label.set_size(9)
+
+
+# --- sidebar: configuration ---------------------------------------
+with st.sidebar:
+    st.markdown("### Reset")
+    if st.button("↺ Restore factory defaults", use_container_width=True,
+                 type="primary",
+                 help="Resets EVERY setting — material, geometry, loading, "
+                      "exchanger, thermal, control mode — and clears the "
+                      "run. Use this if the rig is in a confusing state."):
+        st.session_state["_do_restore"] = True
+        st.rerun()
+    st.caption(
+        "Resets settings **and** the run. For clearing just the run data "
+        "without touching your settings, use **Reset run data** in the "
+        "control bar below the dashboard."
+    )
+
+    st.markdown("### Display")
+    dark_mode = st.toggle("Dark theme", key="w_theme")
+
+    st.markdown("### Rig configuration")
+    mat_key = st.selectbox("Active material", list(MATERIALS),
+                           format_func=lambda k: MATERIALS[k].name,
+                           key="w_material")
+    mat = MATERIALS[mat_key]
+    form = st.radio("Element form", ["tube", "wire"], horizontal=True,
+                    key="w_form")
+    n_elements = st.number_input("Elements in bundle", 1, 40, step=1,
+                                 key="w_n_elements")
+    length_mm = st.number_input("Active length (mm)", 20.0, 500.0, step=5.0,
+                                key="w_length")
+    od_mm = st.number_input("Outer diameter (mm)", 0.5, 30.0, step=0.5,
+                            key="w_od")
+    id_mm = st.number_input("Bore diameter (mm)", 0.1, 29.0, step=0.5,
+                            disabled=(form == "wire"), key="w_id")
+
+    st.markdown("### Loading")
+    strain_mn, strain_mx = 0.5, max(8.0, mat.eps_tr * 100 * 1.3)
+    st.session_state["w_strain"] = min(max(
+        st.session_state["w_strain"], strain_mn), strain_mx)
+    strain_pct = st.slider(
+        "Applied strain (%)", strain_mn, strain_mx, step=0.1, key="w_strain",
+        help=f"Transformation plateau ends near {mat.eps_tr * 100:.1f}%.")
+    compression = st.toggle("Compressive loading", key="w_compression")
+    phase_time = st.slider("Phase duration (s)", 0.2, 5.0, step=0.1,
+                           key="w_phase_time")
+    eta_act = st.slider("Actuator efficiency", 0.3, 0.95, step=0.05,
+                        key="w_eta")
+
+    st.markdown("### Heat transfer")
+    hx_key = st.selectbox("Exchanger", list(EXCHANGERS),
+                          format_func=lambda k: EXCHANGERS[k].name,
+                          key="w_hx")
+    flow_cfm = st.slider("Coolant flow (CFM equivalent)", 10.0, 150.0,
+                         step=5.0, key="w_flow")
+
+    st.markdown("### Enclosure (cold box)")
+    ambient_c = st.number_input("Ambient (°C)", 5.0, 45.0, step=1.0,
+                                key="w_ambient")
+    target_c = st.number_input("Target (°C)", -40.0, 40.0, step=1.0,
+                               key="w_target")
+    chamber_cap = st.number_input("Chamber heat capacity (J/K)",
+                                  50.0, 20000.0, step=50.0,
+                                  key="w_chamber_cap",
+                                  help="Air, payload and inner wall combined.")
+    insulation_ua = st.number_input("Cabinet loss (W/K)", 0.05, 5.0,
+                                    step=0.05, key="w_insulation")
+
+    st.markdown("### Control")
+    auto_mode = st.toggle("Automatic sequencing", key="w_auto")
+    cycles_per_update = st.slider("Cycles per screen update", 1, 20,
+                                  key="w_cycles_update")
+
+theme = get_theme(dark_mode)
 
 st.markdown(f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
-html, body, [class*="css"] {{ font-family:'IBM Plex Sans',system-ui,sans-serif; }}
-.stApp {{ background:#E8EDF1; }}
+html, body, [class*="css"] {{ font-family:'IBM Plex Sans',system-ui,sans-serif;
+  color:{theme["INK"]}; }}
+.stApp {{ background:{theme["APP_BG"]}; }}
 .block-container {{ max-width:1480px; padding-top:1.2rem; }}
 .titlebar {{ display:flex; align-items:baseline; gap:18px;
-  border-bottom:2px solid {INK}; padding-bottom:10px; margin-bottom:22px; }}
-.titlebar h1 {{ font-size:24px; font-weight:600; color:{INK}; margin:0; }}
-.titlebar span {{ font-size:13px; color:{STEEL}; }}
-.verdict {{ background:{PAPER}; border:1px solid {LINE};
-  border-left:5px solid {COLD}; border-radius:4px; padding:20px 24px; }}
-.verdict.blocked {{ border-left-color:{WARM}; }}
-.verdict h2 {{ font-size:20px; font-weight:600; color:{INK}; margin:0 0 6px; }}
-.verdict p {{ font-size:14px; color:{STEEL}; margin:0; line-height:1.6;
+  border-bottom:2px solid {theme["INK"]}; padding-bottom:10px; margin-bottom:22px; }}
+.titlebar h1 {{ font-size:24px; font-weight:600; color:{theme["INK"]}; margin:0; }}
+.titlebar span {{ font-size:13px; color:{theme["STEEL"]}; }}
+.verdict {{ background:{theme["PAPER"]}; border:1px solid {theme["LINE"]};
+  border-left:5px solid {theme["COLD"]}; border-radius:4px; padding:20px 24px; }}
+.verdict.blocked {{ border-left-color:{theme["WARM"]}; }}
+.verdict h2 {{ font-size:20px; font-weight:600; color:{theme["INK"]}; margin:0 0 6px; }}
+.verdict p {{ font-size:14px; color:{theme["STEEL"]}; margin:0; line-height:1.6;
   max-width:78ch; }}
 .figure {{ font-family:'IBM Plex Mono',monospace; font-variant-numeric:tabular-nums;
-  font-size:26px; font-weight:500; color:{INK}; }}
-.figure small {{ font-size:13px; color:{STEEL}; font-weight:400; }}
-.cap {{ font-size:12px; color:{STEEL}; margin-bottom:2px; }}
-.step {{ background:{PAPER}; border:1px solid {LINE}; border-radius:4px;
+  font-size:26px; font-weight:500; color:{theme["INK"]}; }}
+.figure small {{ font-size:13px; color:{theme["STEEL"]}; font-weight:400; }}
+.cap {{ font-size:12px; color:{theme["STEEL"]}; margin-bottom:2px; }}
+.step {{ background:{theme["PAPER"]}; border:1px solid {theme["LINE"]}; border-radius:4px;
   padding:14px 16px; min-height:124px; }}
-.step.active {{ border:1px solid {WARM}; background:#FFFBF4; }}
-.step.done {{ border-left:4px solid {GOOD}; }}
-.step .n {{ font-family:'IBM Plex Mono',monospace; font-size:12px; color:{STEEL}; }}
-.step .t {{ font-size:15px; font-weight:600; color:{INK}; margin-top:6px; }}
-.step .d {{ font-size:12px; color:{STEEL}; margin-top:6px; line-height:1.5; }}
+.step.active {{ border:1px solid {theme["WARM"]};
+  background:{hex_to_rgba(theme["WARM"], 0.08)}; }}
+.step.done {{ border-left:4px solid {theme["GOOD"]}; }}
+.step .n {{ font-family:'IBM Plex Mono',monospace; font-size:12px; color:{theme["STEEL"]}; }}
+.step .t {{ font-size:15px; font-weight:600; color:{theme["INK"]}; margin-top:6px; }}
+.step .d {{ font-size:12px; color:{theme["STEEL"]}; margin-top:6px; line-height:1.5; }}
 .chip {{ display:inline-block; padding:3px 10px; border-radius:3px;
   font-size:11px; font-weight:600; }}
-.chip.run {{ background:#FEF3C7; color:{WARM}; }}
-.chip.hold {{ background:#DCFCE7; color:{GOOD}; }}
-.chip.idle {{ background:#E2E8F0; color:{STEEL}; }}
+.chip.run {{ background:{hex_to_rgba(theme["WARM"], 0.16)}; color:{theme["WARM"]}; }}
+.chip.hold {{ background:{hex_to_rgba(theme["GOOD"], 0.16)}; color:{theme["GOOD"]}; }}
+.chip.idle {{ background:{hex_to_rgba(theme["STEEL"], 0.16)}; color:{theme["STEEL"]}; }}
+.extreme {{ background:{theme["PAPER"]}; border:1px solid {theme["LINE"]};
+  border-radius:4px; padding:10px 14px; }}
 footer, #MainMenu {{ visibility:hidden; }}
 </style>
 """, unsafe_allow_html=True)
-
-
-def style_axes(ax):
-    ax.set_facecolor(PAPER)
-    ax.figure.patch.set_facecolor(PAPER)
-    for side in ("top", "right"):
-        ax.spines[side].set_visible(False)
-    for side in ("left", "bottom"):
-        ax.spines[side].set_color(LINE)
-    ax.tick_params(colors=STEEL, labelsize=8)
-    ax.grid(True, color=LINE, linewidth=0.6, alpha=0.7)
-    ax.set_axisbelow(True)
-    ax.xaxis.label.set_color(STEEL); ax.yaxis.label.set_color(STEEL)
-    ax.xaxis.label.set_size(9); ax.yaxis.label.set_size(9)
-
-
-# --- configuration is resolved BEFORE any state is created -------
-with st.sidebar:
-    st.markdown("### Rig configuration")
-    mat_key = st.selectbox("Active material", list(MATERIALS),
-                           format_func=lambda k: MATERIALS[k].name)
-    mat = MATERIALS[mat_key]
-    form = st.radio("Element form", ["tube", "wire"], horizontal=True)
-    n_elements = st.number_input("Elements in bundle", 1, 40, 5, 1)
-    length_mm = st.number_input("Active length (mm)", 20.0, 500.0, 150.0, 5.0)
-    od_mm = st.number_input("Outer diameter (mm)", 0.5, 30.0, 12.0, 0.5)
-    id_mm = st.number_input("Bore diameter (mm)", 0.1, 29.0, 10.0, 0.5,
-                            disabled=(form == "wire"))
-
-    st.markdown("### Loading")
-    strain_pct = st.slider(
-        "Applied strain (%)", 0.5, max(8.0, mat.eps_tr * 100 * 1.3),
-        round(mat.eps_tr * 100 * 0.9, 1), 0.1,
-        help=f"Transformation plateau ends near {mat.eps_tr*100:.1f}%.")
-    compression = st.toggle("Compressive loading", value=False)
-    phase_time = st.slider("Phase duration (s)", 0.2, 5.0, 0.8, 0.1)
-    eta_act = st.slider("Actuator efficiency", 0.3, 0.95, 0.70, 0.05)
-
-    st.markdown("### Heat transfer")
-    hx_key = st.selectbox("Exchanger", list(EXCHANGERS), index=1,
-                          format_func=lambda k: EXCHANGERS[k].name)
-    flow_cfm = st.slider("Coolant flow (CFM equivalent)", 10.0, 150.0, 50.0, 5.0)
-
-    st.markdown("### Cold box")
-    ambient_c = st.number_input("Ambient (°C)", 5.0, 45.0, 25.0, 1.0)
-    target_c = st.number_input("Target (°C)", -40.0, 40.0, 10.0, 1.0)
-    chamber_cap = st.number_input("Chamber heat capacity (J/K)",
-                                  50.0, 20000.0, 800.0, 50.0,
-                                  help="Air, payload and inner wall combined.")
-    insulation_ua = st.number_input("Cabinet loss (W/K)", 0.05, 5.0, 0.35, 0.05)
-
-    st.markdown("### Control")
-    auto_mode = st.toggle("Automatic sequencing", value=True)
-    cycles_per_update = st.slider("Cycles per screen update", 1, 20, 4)
 
 cfg = Config(material_key=mat_key, exchanger_key=hx_key, form=form,
              n_elements=int(n_elements), length_mm=length_mm, od_mm=od_mm,
@@ -465,7 +563,7 @@ cfg = Config(material_key=mat_key, exchanger_key=hx_key, form=form,
              target_c=target_c, chamber_capacity=chamber_cap,
              insulation_ua=insulation_ua, actuator_efficiency=eta_act)
 
-# --- session state -----------------------------------------------
+# --- run-time session state (separate from the widget/config state) ----
 MAX_POINTS = 2400
 
 
@@ -493,26 +591,41 @@ def record():
         for key in log:
             del log[key][0]
 
+    ex = st.session_state.extremes
+    ex["chamber_max"] = max(ex["chamber_max"], s.t_chamber)
+    ex["chamber_min"] = min(ex["chamber_min"], s.t_chamber)
+    ex["element_max"] = max(ex["element_max"], s.t_element)
+    ex["element_min"] = min(ex["element_min"], s.t_element)
+
 
 def reset(reason: str = "Controller reset."):
+    """Resets the RUN only — cycle count, history, energy tally,
+    max/min tracking. Does not touch the sidebar settings."""
     st.session_state.state = initial_state(cfg)
     st.session_state.running = False
     st.session_state.log = blank_log()
     st.session_state.events = []
     st.session_state.energy = [0.0, 0.0]        # [Q_cold J, W_in J]
+    st.session_state.extremes = {
+        "chamber_max": cfg.ambient_c, "chamber_min": cfg.ambient_c,
+        "element_max": cfg.ambient_c, "element_min": cfg.ambient_c,
+    }
     record()
     event(reason)
 
 
-if "state" not in st.session_state:
-    reset("Controller initialised.")
+need_reset = "state" not in st.session_state
+full_restore_pending = st.session_state.pop("_pending_full_reset", False)
+if need_reset or full_restore_pending:
+    reset("Factory defaults restored — all settings and run data cleared."
+          if full_restore_pending else "Controller initialised.")
 
 state: State = st.session_state.state
 
 
 def advance_phase():
     """Run the next phase. Always reads the live object out of session
-    state — the module-level `state` reference goes stale after one step."""
+    state — a stale local reference would silently skip updates."""
     cur: State = st.session_state.state
     nxt = cur.phase % 4 + 1
     st.session_state.state = step_phase(cfg, cur, nxt)
@@ -537,6 +650,24 @@ st.markdown(f"""
 <span>{mat.name} &nbsp;·&nbsp; {EXCHANGERS[hx_key].name}
 &nbsp;·&nbsp; {cfg.n_elements} × {cfg.length_mm:.0f} mm</span></div>
 """, unsafe_allow_html=True)
+
+with st.expander("Quick guide", expanded=False):
+    st.markdown(
+        "- The rig runs a **four-phase cycle**: load → reject heat → "
+        "unload → absorb heat. One full pass of all four is one cycle.\n"
+        "- **Start sequencing** runs it automatically; **Step one phase** "
+        "(shown when Automatic sequencing is off) lets you advance one "
+        "phase at a time.\n"
+        "- **Run to steady state** solves forward instantly without "
+        "redrawing every step — use it when you want the answer, not the "
+        "animation.\n"
+        "- **Reset run data** clears the current run but keeps your "
+        "settings. **Restore factory defaults** (top of the sidebar) "
+        "clears everything, including material and geometry — use it if "
+        "the rig ends up in a state you don't understand.\n"
+        "- The **Enclosure & wire extremes** panel below tracks the "
+        "highest and lowest temperature reached since the last reset."
+    )
 
 if env["reachable"]:
     headline = f"This configuration can hold {cfg.target_c:.1f} °C."
@@ -624,8 +755,10 @@ with c2:
         st.rerun()
 
 with c3:
-    if st.button("Reset controller", use_container_width=True):
-        reset("Controller reset by operator.")
+    if st.button("Reset run data", use_container_width=True,
+                 help="Clears the run history and cycle count but keeps "
+                      "your material and rig settings."):
+        reset("Run data reset by operator.")
         st.rerun()
 
 with c4:
@@ -684,6 +817,25 @@ for col, (cap, value, unit) in zip(st.columns(6), [
 
 for severity, message in check_interlocks(cfg, state):
     (st.error if severity == "alarm" else st.warning)(message)
+
+st.write("")
+
+# --- enclosure & wire (element) extremes ---------------------------
+st.markdown("**Enclosure & wire extremes**  "
+            "<span style='color:%s;font-size:12px'>(since last reset)</span>"
+            % theme["STEEL"], unsafe_allow_html=True)
+
+ex = st.session_state.extremes
+for col, (cap, value) in zip(st.columns(4), [
+        ("Enclosure — maximum", f"{ex['chamber_max']:.2f} °C"),
+        ("Enclosure — minimum", f"{ex['chamber_min']:.2f} °C"),
+        ("Wire / element — maximum", f"{ex['element_max']:.2f} °C"),
+        ("Wire / element — minimum", f"{ex['element_min']:.2f} °C")]):
+    with col:
+        st.markdown(f'<div class="extreme"><div class="cap">{cap}</div>'
+                    f'<div class="figure" style="font-size:20px">{value}</div>'
+                    f'</div>', unsafe_allow_html=True)
+
 st.write("")
 
 # --- trends ---------------------------------------------------------
@@ -693,24 +845,29 @@ g1, g2 = st.columns([1.55, 1])
 with g1:
     st.markdown("**Pull-down**")
     fig, ax = plt.subplots(figsize=(8.2, 3.5))
-    style_axes(ax)
+    style_axes(ax, theme)
     t = np.asarray(log["t"])
-    ax.plot(t, log["element"], color=WARM, lw=1.0, alpha=0.75, label="Element")
-    ax.plot(t, log["chamber"], color=COLD, lw=2.2, label="Cold box")
-    ax.axhline(cfg.target_c, color=GOOD, ls="--", lw=1.2, label="Target")
-    ax.axhline(cfg.ambient_c, color=STEEL, ls=":", lw=1.0, label="Ambient")
+    ax.plot(t, log["element"], color=theme["WARM"], lw=1.0, alpha=0.75,
+            label="Element")
+    ax.plot(t, log["chamber"], color=theme["COLD"], lw=2.2, label="Cold box")
+    ax.axhline(cfg.target_c, color=theme["GOOD"], ls="--", lw=1.2,
+              label="Target")
+    ax.axhline(cfg.ambient_c, color=theme["STEEL"], ls=":", lw=1.0,
+              label="Ambient")
     ax.set_xlabel("Elapsed time (s)"); ax.set_ylabel("Temperature (°C)")
-    ax.legend(frameon=False, fontsize=8, ncols=4, loc="upper right")
+    leg = ax.legend(frameon=False, fontsize=8, ncols=4, loc="upper right")
+    for text in leg.get_texts():
+        text.set_color(theme["STEEL"])
     st.pyplot(fig, clear_figure=True); plt.close(fig)
 
 with g2:
     st.markdown("**Stress–strain path**")
     fig2, ax2 = plt.subplots(figsize=(5.2, 3.5))
-    style_axes(ax2)
+    style_axes(ax2, theme)
     ax2.plot(log["strain"][-160:], log["stress"][-160:],
-             color=INK, lw=1.4, alpha=0.85)
+             color=theme["INK"], lw=1.4, alpha=0.85)
     ax2.scatter([state.strain_pct], [state.stress_mpa],
-                s=55, color=WARM, zorder=5)
+                s=55, color=theme["WARM"], zorder=5)
     ax2.set_xlabel("Strain (%)"); ax2.set_ylabel("Stress (MPa)")
     st.pyplot(fig2, clear_figure=True); plt.close(fig2)
 
@@ -718,10 +875,10 @@ h1, h2 = st.columns([1.55, 1])
 with h1:
     st.markdown("**Coefficient of performance per cycle**")
     fig3, ax3 = plt.subplots(figsize=(8.2, 2.4))
-    style_axes(ax3)
+    style_axes(ax3, theme)
     cyc, cop = np.asarray(log["cycle"]), np.asarray(log["cop"])
     mask = cyc > 0
-    ax3.plot(cyc[mask], cop[mask], color=COLD, lw=1.6)
+    ax3.plot(cyc[mask], cop[mask], color=theme["COLD"], lw=1.6)
     ax3.set_xlabel("Cycle"); ax3.set_ylabel("COP (–)")
     st.pyplot(fig3, clear_figure=True); plt.close(fig3)
 
@@ -773,6 +930,8 @@ def build_report() -> str:
         ("Sustainable minimum", f"{env['t_min_c']:.2f} °C"),
         ("Cycles completed", f"{state.cycle}"),
         ("Cold box now", f"{state.t_chamber:.2f} °C"),
+        ("Enclosure max / min", f"{ex['chamber_max']:.2f} / {ex['chamber_min']:.2f} °C"),
+        ("Wire max / min", f"{ex['element_max']:.2f} / {ex['element_min']:.2f} °C"),
         ("Run-average COP", f"{avg_cop:.3f}"),
         ("Cooling energy delivered", f"{q_tot/1000:.2f} kJ"),
         ("Work input", f"{w_tot/1000:.2f} kJ"),
