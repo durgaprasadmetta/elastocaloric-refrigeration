@@ -5,7 +5,7 @@ import time
 
 # Professional Page Layout Configuration
 st.set_page_config(
-    page_title="Elastocaloric Advanced Simulation Center", 
+    page_title="Industrial Elastocaloric Control Center", 
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -20,7 +20,7 @@ if "temp_history" not in st.session_state:
 if "current_stage_idx" not in st.session_state:
     st.session_state.current_stage_idx = 0  
 
-# Expanded Multi-Node Thermal State Variables
+# All Multi-Node Expert Thermal State Variables Present
 if "wire_max_temp" not in st.session_state:
     st.session_state.wire_max_temp = 25.0
 if "wire_min_temp" not in st.session_state:
@@ -29,10 +29,8 @@ if "air_max_temp" not in st.session_state:
     st.session_state.air_max_temp = 25.0
 if "air_min_temp" not in st.session_state:
     st.session_state.air_min_temp = 25.0
-if "ambient_air_temp" not in st.session_state:
-    st.session_state.ambient_air_temp = 25.0
 
-# Mechanical Tracking
+# Mechanical Metrics & Toggles
 if "stress" not in st.session_state:
     st.session_state.stress = 0.0
 if "strain" not in st.session_state:
@@ -78,7 +76,6 @@ if st.session_state.cycle_count == 0 and len(st.session_state.temp_history) == 1
     st.session_state.wire_min_temp = ambient_temp
     st.session_state.air_max_temp = ambient_temp
     st.session_state.air_min_temp = ambient_temp
-    st.session_state.ambient_air_temp = ambient_temp
 
 # ================= SIDEBAR QUICK OVERRIDES =================
 st.sidebar.header("🕹️ RUN PARAMETERS")
@@ -96,7 +93,7 @@ def execute_step_physics(stage_idx):
     mass_factor = (num_wires / 5.0) * (wire_len / 150.0)
     latent_delta = 12.5 * (strain_limit / 5.0)
     
-    if stage_idx == 1: 
+    if stage_idx == 1: # STAGE 1: TENSILE LOADING
         st.session_state.strain = strain_limit
         st.session_state.stress = 450.0 + (strain_limit * 12)
         st.session_state.fan_1 = "STANDBY [OFF]"
@@ -104,7 +101,7 @@ def execute_step_physics(stage_idx):
         st.session_state.wire_max_temp = ambient_temp + latent_delta
         st.session_state.air_max_temp = ambient_temp + (latent_delta * 0.4)
         
-    elif stage_idx == 2: 
+    elif stage_idx == 2: # STAGE 2: HEAT EXHAUST BLOW
         st.session_state.strain = strain_limit
         st.session_state.stress = 410.0
         st.session_state.fan_1 = f"ACTIVE BLOWING [{fan_flow} CFM]"
@@ -113,7 +110,7 @@ def execute_step_physics(stage_idx):
         st.session_state.wire_max_temp -= (st.session_state.wire_max_temp - ambient_temp) * cooling_efficiency
         st.session_state.air_max_temp -= (st.session_state.air_max_temp - ambient_temp) * cooling_efficiency
         
-    elif stage_idx == 3: 
+    elif stage_idx == 3: # STAGE 3: CORE UNLOADING
         st.session_state.strain = 0.0
         st.session_state.stress = 120.0
         st.session_state.fan_1 = "STANDBY [OFF]"
@@ -121,7 +118,7 @@ def execute_step_physics(stage_idx):
         st.session_state.wire_min_temp = ambient_temp - latent_delta
         st.session_state.air_min_temp = ambient_temp - (latent_delta * 0.5)
         
-    elif stage_idx == 4: 
+    elif stage_idx == 4: # STAGE 4: CHILLED VAULT CIRCULATION
         st.session_state.strain = 0.0
         st.session_state.stress = 0.0
         st.session_state.fan_1 = "STANDBY [OFF]"
@@ -143,7 +140,6 @@ def execute_step_physics(stage_idx):
 
 # ================= TAB 1: FRONT-END PRESENTATION =================
 with tab1:
-    # 🎛️ PERMANENTLY EXPOSED UNIFIED SYSTEM OPERATION CONSOLE
     st.markdown("### 🎚️ Master Control Panel (Manual & Automation Override)")
     ctrl_col1, ctrl_col2, ctrl_col3 = st.columns(3)
     
@@ -179,7 +175,7 @@ with tab1:
     with ctrl_col3:
         st.info(f"**Selected Mode:** {mode}")
 
-    # Process background loop execution if auto running state is triggered
+    # Process unrolled background loop iteration dynamically
     if mode == "Automated Cycling Loop" and st.session_state.auto_running:
         execute_step_physics(1)
         time.sleep(cycle_speed)
@@ -199,16 +195,15 @@ with tab1:
     with m_col1:
         if st.session_state.current_stage_idx == 1:
             st.success("🔥 **STAGE 1 ACTIVE**\n\nTensile Loading Core")
-        else:
-            st.info("Stage 1: Tension Load")
+        else: st.info("Stage 1: Tension Load")
             
     with m_col2:
         if st.session_state.current_stage_idx == 2:
             st.success("💨 **STAGE 2 ACTIVE**\n\nWarm Air Heat Exhaust")
-        else:
-            st.info("Stage 2: Warm Exhaust")
+        else: st.info("Stage 2: Warm Exhaust")
             
     with m_col3:
         if st.session_state.current_stage_idx == 3:
             st.success("❄️ **STAGE 3 ACTIVE**\n\nCore Release Relaxation")
-
+        else: st.info("Stage 3: Tensile Unload")
+            
