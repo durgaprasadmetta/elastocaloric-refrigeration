@@ -20,7 +20,7 @@ if "temp_history" not in st.session_state:
 if "current_stage_idx" not in st.session_state:
     st.session_state.current_stage_idx = 0  
 
-# All Multi-Node Expert Thermal State Variables Active
+# Expanded Multi-Node Thermal State Variables
 if "wire_max_temp" not in st.session_state:
     st.session_state.wire_max_temp = 25.0
 if "wire_min_temp" not in st.session_state:
@@ -32,7 +32,7 @@ if "air_min_temp" not in st.session_state:
 if "ambient_air_temp" not in st.session_state:
     st.session_state.ambient_air_temp = 25.0
 
-# Mechanical Tracking Array
+# Mechanical Tracking
 if "stress" not in st.session_state:
     st.session_state.stress = 0.0
 if "strain" not in st.session_state:
@@ -81,7 +81,7 @@ if st.session_state.cycle_count == 0 and len(st.session_state.temp_history) == 1
     st.session_state.ambient_air_temp = ambient_temp
 
 # ================= SIDEBAR QUICK OVERRIDES =================
-st.sidebar.header("🕹️ CONTROL RUN TIME")
+st.sidebar.header("🕹️ RUN PARAMETERS")
 st.sidebar.markdown("---")
 strain_limit = st.sidebar.slider("Peak Tensile Strain Bounds (ε):", 2.0, 8.0, 5.0, step=0.5, format="%.1f %%")
 cycle_speed = st.sidebar.slider("Automation Loop Delay Spacing (seconds):", 0.2, 3.0, 0.8, step=0.1, format="%.1f sec/phase")
@@ -143,8 +143,8 @@ def execute_step_physics(stage_idx):
 
 # ================= TAB 1: FRONT-END PRESENTATION =================
 with tab1:
-    # --- MASTER SYSTEM OVERRIDES PANEL ---
-    st.markdown("### 🎚️ Master Control Panel Overrides")
+    # 🎛️ PERMANENTLY EXPOSED UNIFIED SYSTEM OPERATION CONSOLE
+    st.markdown("### 🎚️ Master Control Panel (Manual & Automation Override)")
     ctrl_col1, ctrl_col2, ctrl_col3 = st.columns(3)
     
     with ctrl_col1:
@@ -158,7 +158,7 @@ with tab1:
                     st.session_state.auto_running = False
                     st.rerun()
         else:
-            st.markdown("**Manual Operations Active** *(Use triggers below)*")
+            st.markdown("**Manual Step Mode Active** *(Use grid triggers below)*")
             
     with ctrl_col2:
         if st.button("🔄 Reset System Metrics (Master Reset)", type="secondary", use_container_width=True):
@@ -186,27 +186,28 @@ with tab1:
     with m_col1:
         if st.session_state.current_stage_idx == 1:
             st.success("🔥 **STAGE 1 ACTIVE**\n\nTensile Loading Core")
-        else: st.info("Stage 1: Tension Load")
+        else:
+            st.info("Stage 1: Tension Load")
             
     with m_col2:
         if st.session_state.current_stage_idx == 2:
             st.success("💨 **STAGE 2 ACTIVE**\n\nWarm Air Heat Exhaust")
-        else: st.info("Stage 2: Warm Exhaust")
+        else:
+            st.info("Stage 2: Warm Exhaust")
             
     with m_col3:
         if st.session_state.current_stage_idx == 3:
             st.success("❄️ **STAGE 3 ACTIVE**\n\nCore Release Relaxation")
-        else: st.info("Stage 3: Tensile Unload")
+        else:
+            st.info("Stage 3: Tensile Unload")
             
     with m_col4:
         if st.session_state.current_stage_idx == 4:
             st.success("🥶 **STAGE 4 ACTIVE**\n\nChilled Air Vault Circulation")
-        else: st.info("Stage 4: Cold Circulation")
+        else:
+            st.info("Stage 4: Cold Circulation")
 
     st.markdown("---")
     col_f1, col_f2, col_f3 = st.columns(3)
     
     with col_f1:
-        st.markdown("#### 🏢 Active Real-Time Mechanism")
-        with st.container(border=True):
-            st.markdown("**Core Bundle Pulling Stroke Mechanics**")
