@@ -33,7 +33,6 @@ if "auto_running" not in st.session_state:
     st.session_state.auto_running = False
 
 # ================= NAVIGATION DASHBOARD TABS =================
-# Separates your front-end presentation results from the back-end system settings
 tab1, tab2 = st.tabs(["🖥️ Front-End Control & Live Diagnostics", "⚙️ System Back-End Specifications"])
 
 # ================= TAB 2: BACK-END SPECIFICATIONS =================
@@ -74,7 +73,6 @@ mode = st.sidebar.radio("Select Operational Architecture:", ["Manual Diagnostics
 
 # ================= CYCLIC PHYSICS CORE STEP LOGIC =================
 def execute_step_physics(stage_idx):
-    # Dynamic mass bounds based on back-end wire quantity
     mass_factor = (num_wires / 5.0) * (wire_len / 150.0)
     
     if stage_idx == 1:
@@ -105,7 +103,6 @@ def execute_step_physics(stage_idx):
         st.session_state.fan_1 = "STANDBY [OFF]"
         st.session_state.fan_2 = f"ACTIVE CHILLING [{fan_flow} CFM]"
         
-        # Calculate localized heat exchange capacity using back-end insulation metrics
         insulation_coeff = 1.0 if insulation_loss == "Standard Double-Wall Vacuum Insulated" else (1.4 if insulation_loss == "High Grade Polyurethane Foam" else 0.5)
         if st.session_state.chamber_temp > target_limit:
             efficiency_scalar = 0.05 * (2.0 / wire_dia) * (fan_flow / 50.0) * mass_factor * insulation_coeff
@@ -126,7 +123,6 @@ with tab1:
         with st.container(border=True):
             st.markdown("**Core Bundle Status [Pulling Mechanics]**")
             
-            # Simulated Physical Stretching Mechanism Display Bar
             stretch_pct = int((st.session_state.strain / 8.0) * 100)
             st.markdown(f"**Bundle Physical Displacement Length Strain:** `{st.session_state.strain:.1f} %`")
             st.progress(min(100, max(0, stretch_pct)))
@@ -171,7 +167,6 @@ with tab1:
             else:
                 st.markdown("**Automated Sequential Execution:**")
                 
-                # Sequential Loop Execution Control
                 if not st.session_state.auto_running:
                     if st.button("🚀 Start Continuous Sequence", type="primary", use_container_width=True):
                         st.session_state.auto_running = True
@@ -181,10 +176,19 @@ with tab1:
                         st.session_state.auto_running = False
                         st.rerun()
                     
-                    # FIXED: Explicit sequential numerical list range provided
-                    for phase in:
-                        execute_step_physics(phase)
-                        time.sleep(cycle_speed)
+                    # LOOP ENTIRELY REMOVED: Executing steps manually one by one to prevent any syntax crashes
+                    execute_step_physics(1)
+                    time.sleep(cycle_speed)
+                    
+                    execute_step_physics(2)
+                    time.sleep(cycle_speed)
+                    
+                    execute_step_physics(3)
+                    time.sleep(cycle_speed)
+                    
+                    execute_step_physics(4)
+                    time.sleep(cycle_speed)
+                    
                     st.session_state.cycle_count += 1
                     st.rerun()
                         
