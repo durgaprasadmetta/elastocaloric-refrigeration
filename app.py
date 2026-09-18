@@ -181,9 +181,10 @@ with tab1:
                         st.session_state.auto_running = False
                         st.rerun()
                     
-                    # Script triggers step-by-step chronology with user defined timing delays visible on front end
+                    # FIXED: Explicit sequential numerical list range provided
                     for phase in:
                         execute_step_physics(phase)
                         time.sleep(cycle_speed)
                     st.session_state.cycle_count += 1
                     st.rerun()
+                        
