@@ -32,7 +32,7 @@ if "air_min_temp" not in st.session_state:
 if "ambient_air_temp" not in st.session_state:
     st.session_state.ambient_air_temp = 25.0
 
-# Mechanical Tracking
+# Mechanical Tracking Variables
 if "stress" not in st.session_state:
     st.session_state.stress = 0.0
 if "strain" not in st.session_state:
@@ -81,7 +81,7 @@ if st.session_state.cycle_count == 0 and len(st.session_state.temp_history) == 1
     st.session_state.ambient_air_temp = ambient_temp
 
 # ================= SIDEBAR QUICK OVERRIDES =================
-st.sidebar.header("🕹️ RUN PARAMETERS")
+st.sidebar.header("🕹️ CONTROL RUN TIME")
 st.sidebar.markdown("---")
 strain_limit = st.sidebar.slider("Peak Tensile Strain Bounds (ε):", 2.0, 8.0, 5.0, step=0.5, format="%.1f %%")
 cycle_speed = st.sidebar.slider("Automation Loop Delay Spacing (seconds):", 0.2, 3.0, 0.8, step=0.1, format="%.1f sec/phase")
@@ -143,8 +143,7 @@ def execute_step_physics(stage_idx):
 
 # ================= TAB 1: FRONT-END PRESENTATION =================
 with tab1:
-    # 🎛️ PERMANENTLY EXPOSED UNIFIED SYSTEM OPERATION CONSOLE
-    st.markdown("### 🎚️ Master Control Panel (Manual & Automation Override)")
+    st.markdown("### 🎚️ Master Control Panel Overrides")
     ctrl_col1, ctrl_col2, ctrl_col3 = st.columns(3)
     
     with ctrl_col1:
@@ -158,7 +157,7 @@ with tab1:
                     st.session_state.auto_running = False
                     st.rerun()
         else:
-            st.markdown("**Manual Step Mode Active** *(Use grid triggers below)*")
+            st.markdown("**Manual Operations Active** *(Use triggers below)*")
             
     with ctrl_col2:
         if st.button("🔄 Reset System Metrics (Master Reset)", type="secondary", use_container_width=True):
