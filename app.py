@@ -187,4 +187,4 @@ with tab1:
                         time.sleep(cycle_speed)
                     st.session_state.cycle_count += 1
                     st.rerun()
-                        
+            
