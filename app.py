@@ -41,7 +41,7 @@ if "auto_running" not in st.session_state:
     st.session_state.auto_running = False
 
 # ================= NAVIGATION DASHBOARD TABS =================
-tab1, tab2 = st.tabs(["🖥️ Front-End Live presentation & SCADA Graphics", "⚙️ System Back-End Parameters"])
+tab1, tab2 = st.tabs(["🖥️ Front-End Live Presentation & SCADA Graphics", "⚙️ System Back-End Parameters"])
 
 # ================= TAB 2: BACK-END PARAMETERS =================
 with tab2:
@@ -126,7 +126,7 @@ def execute_step_physics(stage_idx):
             
         st.session_state.cop = abs((ambient_temp - st.session_state.chamber_temp) / (strain_limit * 0.4 + 0.1))
 
-# ================= TAB 1: FRONT-END presentation =================
+# ================= TAB 1: FRONT-END PRESENTATION =================
 with tab1:
     st.markdown("### 🎚️ Master Control Panel Overrides")
     ctrl_col1, ctrl_col2, ctrl_col3 = st.columns(3)
@@ -165,7 +165,7 @@ with tab1:
 
     st.markdown("---")
     
-    # ================= ⚡ ANIMATED SCADA PIPING & EXPANDING VALVE SECTIONS =================
+    # ================= ⚡ ANIMATED SCADA PIPING AND STATUS TILES =================
     st.markdown("### 🚦 Live SCADA Flow Manifold Tracking Pane")
     s1, s2, s3, s4 = st.columns(4)
     
@@ -199,3 +199,4 @@ with tab1:
                 st.markdown("**Circulation Valve:** `CLOSED 🔴`")
                 st.markdown("🧊 *Adiabatic Latent Temperature Plunge*")
         else:
+            with st.status("Phase 3: Actuator Discharge", state="complete", expanded=False):
