@@ -37,7 +37,7 @@ if "cop" not in st.session_state:
 # ================= SIDEBAR CRITICAL SYSTEM INPUTS =================
 st.sidebar.header("🛠️ CORE SPECIFICATIONS")
 st.sidebar.markdown("---")
-st.sidebar.markdown("### **Fixed Core Geometry**")
+st.sidebar.markdown("### **Fixed Geometry Baseline**")
 st.sidebar.markdown("- **Active Bundle Elements:** 5 Wires")
 st.sidebar.markdown("- **Core Strand Length:** 150.0 mm")
 st.sidebar.markdown("---")
@@ -115,7 +115,7 @@ with col1:
 
 with col2:
     st.markdown("### 📊 Thermodynamic Performance")
-    with St.container(border=True):
+    with st.container(border=True):
         st.markdown("#### **Real-Time Efficiency Metrics**")
         st.metric(label="Total Completed Cycles (N)", value=st.session_state.cycle_count)
         st.metric(label="Coefficient of Performance (COP)", value=f"{st.session_state.cop:.2f}")
