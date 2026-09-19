@@ -489,7 +489,9 @@ def get_theme(dark: bool) -> dict:
 # ---------------------------------------------------------------
 
 DEFAULTS = {
-    "w_theme": True,                # False = light, True = dark
+    "w_theme": True,                 # False = light, True = dark — dark is
+                                      # the default per spec; reset never
+                                      # touches this key (see _THEME_KEY).
     "w_material": "niti",
     "w_form": "tube",
     "w_n_elements": 5,
@@ -497,6 +499,15 @@ DEFAULTS = {
     "w_od": 12.0,
     "w_id": 10.0,
     "w_strain": round(MATERIALS["niti"].eps_tr * 100 * 0.9, 1),
+    # Boundary-condition panel. "w_bc_disp_mm" defaults to whatever the
+    # standard strain/length defaults above already imply, purely so the
+    # two views agree with each other if a person switches straight to
+    # User Defined without touching anything first.
+    "w_bc_mode": "Fixed + Displacement",
+    "w_bc_fixed_end": "Left",
+    "w_bc_direction": "Tension (elongation)",
+    "w_bc_disp_mm": round(
+        150.0 * (MATERIALS["niti"].eps_tr * 100 * 0.9) / 100, 2),
     "w_compression": False,
     "w_phase_time": 0.8,
     "w_eta": 0.70,
@@ -605,15 +616,72 @@ with st.sidebar:
     id_mm = st.number_input("Bore diameter (mm)", 0.1, 29.0, step=0.5,
                             disabled=(form == "wire"), key="w_id")
 
+    st.markdown("### Boundary Conditions")
+    st.caption(
+        "One end of the NiTi element is always Fixed; the opposite end is "
+        "always Displacement-controlled. This rule can't be broken from "
+        "this control — picking a Fixed end automatically makes the "
+        "other end the Displacement end."
+    )
+    bc_mode = st.selectbox(
+        "Support configuration",
+        ["Fixed + Displacement", "User Defined"], key="w_bc_mode",
+        help="Fixed + Displacement: the standard setup — magnitude and "
+             "direction follow the strain and loading-direction controls "
+             "below. User Defined: specify the displacement end, "
+             "direction and magnitude directly.")
+    bc_fixed_end = st.radio(
+        "Fixed end", ["Left", "Right"], horizontal=True, key="w_bc_fixed_end")
+    bc_other_end = "Right" if bc_fixed_end == "Left" else "Left"
+    st.caption(f"Fixed end: **{bc_fixed_end}**  ·  "
+              f"Displacement end: **{bc_other_end}** (set automatically)")
+
+    if bc_mode == "User Defined":
+        bc_direction = st.radio(
+            "Displacement direction",
+            ["Tension (elongation)", "Compression (contraction)"],
+            key="w_bc_direction")
+        bc_disp_max_mm = round(length_mm * 0.10, 2)
+        bc_disp_mm = st.number_input(
+            "Displacement magnitude (mm)", 0.05, max(0.1, bc_disp_max_mm),
+            step=0.05, key="w_bc_disp_mm",
+            help=f"Bounded to 10% of the {length_mm:.0f} mm active length "
+                 f"as a generic mechanical-stroke limit.")
+        _bc_eff_strain_preview = round(bc_disp_mm / length_mm * 100, 2) \
+            if length_mm > 0 else 0.0
+        _mat_preview = MATERIALS[mat_key]
+        st.caption(f"Equivalent strain: **{_bc_eff_strain_preview:.2f}%** "
+                  f"of a {length_mm:.0f} mm element.")
+        if _bc_eff_strain_preview > _mat_preview.eps_tr * 100 * 1.15:
+            st.warning(
+                f"This displacement implies {_bc_eff_strain_preview:.1f}% "
+                f"strain, past {_mat_preview.name.split('(')[0].strip()}'s "
+                f"{_mat_preview.eps_tr*100:.1f}% transformation plateau. "
+                f"Reduce the displacement or expect a plastic-deformation "
+                f"alarm below.")
+    else:
+        bc_direction = None
+        bc_disp_mm = None
+        st.caption(
+            "Magnitude and direction are taken from **Applied strain** and "
+            "**Compressive loading** in the Loading section below.")
+
     st.markdown("### Loading")
     strain_mn, strain_mx = 0.5, max(8.0, mat.eps_tr * 100 * 1.3)
     st.session_state["w_strain"] = min(max(
         st.session_state["w_strain"], strain_mn), strain_mx)
+    _bc_overrides_loading = (bc_mode == "User Defined")
     strain_pct = st.slider(
         "Applied strain (%)", strain_mn, strain_mx, step=0.1, key="w_strain",
-        help=f"Transformation plateau ends near {mat.eps_tr * 100:.1f}%.")
-    compression = st.toggle("Compressive loading", key="w_compression")
-    phase_time = st.slider("Phase duration (s)", 0.2, 60.0, step=0.1,
+        disabled=_bc_overrides_loading,
+        help=("Set by the Boundary Conditions panel above while User "
+              "Defined is selected." if _bc_overrides_loading else
+              f"Transformation plateau ends near {mat.eps_tr * 100:.1f}%."))
+    compression = st.toggle("Compressive loading", key="w_compression",
+                            disabled=_bc_overrides_loading)
+    if _bc_overrides_loading:
+        st.caption("↑ Controlled by Boundary Conditions above.")
+    phase_time = st.slider("Phase duration (s)", 0.2, 5.0, step=0.1,
                            key="w_phase_time")
     eta_act = st.slider("Actuator efficiency", 0.3, 0.95, step=0.05,
                         key="w_eta")
@@ -805,9 +873,25 @@ div[data-baseweb="select"] > div {{
 </style>
 """, unsafe_allow_html=True)
 
+# Resolve the two possible sources of strain/direction into the single
+# pair the physics actually uses. This is a plain local-variable choice,
+# made once per script run — it does not write back into either widget's
+# session_state key, so it can't trigger the
+# StreamlitWidgetAlreadyInstantiatedError class of bug and needs no
+# st.rerun() to take effect. Changing Support configuration therefore
+# updates the simulation on the very next run, live, without any reset.
+if bc_mode == "User Defined":
+    effective_strain_pct = round(bc_disp_mm / length_mm * 100, 3) \
+        if length_mm > 0 else strain_pct
+    effective_compression = (bc_direction == "Compression (contraction)")
+else:
+    effective_strain_pct = strain_pct
+    effective_compression = compression
+
 cfg = Config(material_key=mat_key, exchanger_key=hx_key, form=form,
              n_elements=int(n_elements), length_mm=length_mm, od_mm=od_mm,
-             id_mm=id_mm, strain_pct=strain_pct, mode_compression=compression,
+             id_mm=id_mm, strain_pct=effective_strain_pct,
+             mode_compression=effective_compression,
              phase_time_s=phase_time, flow_cfm=flow_cfm, ambient_c=ambient_c,
              target_c=target_c, chamber_capacity=chamber_cap,
              insulation_ua=insulation_ua, actuator_efficiency=eta_act,
@@ -907,6 +991,65 @@ st.markdown(f"""
 <span>{mat.name} &nbsp;·&nbsp; {EXCHANGERS[hx_key].name}
 &nbsp;·&nbsp; {cfg.n_elements} × {cfg.length_mm:.0f} mm</span></div>
 """, unsafe_allow_html=True)
+
+
+def render_boundary_diagram(theme_d, fixed_end, is_compression,
+                            magnitude_mm, magnitude_pct, mode_label):
+    """
+    Builds the Fixed-end / Displacement-end diagram. Which side carries
+    which label is decided purely by `fixed_end` — there is no code path
+    that can mark both ends, or neither, as Fixed: the function always
+    derives exactly one Displacement end as "whichever end is not
+    Fixed", so the invalid states the spec rules out (both Fixed, both
+    Displacement, neither valid) are structurally unreachable here.
+    """
+    rod_color = theme_d["WARM"] if is_compression else theme_d["COLD"]
+    verb = "shortens" if is_compression else "elongates"
+    sign = "−" if is_compression else "+"
+    disp_label = (f"DISPLACEMENT<br><span style='font-weight:400;"
+                  f"font-size:11px'>{sign}{magnitude_mm:.2f} mm "
+                  f"({sign}{magnitude_pct:.2f}% strain) · element "
+                  f"{verb}</span>")
+
+    wall = (f'<div style="display:flex;flex-direction:column;'
+           f'align-items:center;gap:6px;min-width:92px">'
+           f'<div style="font-size:11px;font-weight:700;'
+           f'color:{theme_d["INK"]};letter-spacing:0.5px">FIXED</div>'
+           f'<div style="width:14px;height:54px;'
+           f'background:repeating-linear-gradient(135deg,'
+           f'{theme_d["INK"]},{theme_d["INK"]} 3px,transparent 3px,'
+           f'transparent 8px);border-radius:2px"></div></div>')
+
+    arrow_char = "&#8592;" if (fixed_end == "Right") != is_compression \
+        else "&#8594;"
+    disp_end = (f'<div style="display:flex;flex-direction:column;'
+               f'align-items:center;gap:6px;min-width:150px">'
+               f'<div style="font-size:11px;font-weight:700;'
+               f'color:{rod_color};letter-spacing:0.5px;text-align:center">'
+               f'{disp_label}</div>'
+               f'<div style="font-size:26px;color:{rod_color};'
+               f'line-height:1">{arrow_char}</div></div>')
+
+    rod = (f'<div style="flex:1;height:16px;border-radius:8px;'
+          f'background:linear-gradient(90deg,{rod_color}66,{rod_color});'
+          f'margin:0 4px"></div>')
+
+    parts = [wall, rod, disp_end] if fixed_end == "Left" \
+        else [disp_end, rod, wall]
+
+    return (f'<div class="verdict" style="display:flex;align-items:center;'
+           f'justify-content:center;gap:10px;padding:22px 24px">'
+           f'{"".join(parts)}</div>'
+           f'<div style="text-align:center;font-size:12px;'
+           f'color:{theme_d["STEEL"]};margin-top:8px">'
+           f'Support configuration: <b>{mode_label}</b></div>')
+
+
+st.markdown(render_boundary_diagram(
+    theme, bc_fixed_end, effective_compression,
+    cfg.strain * cfg.length_mm, effective_strain_pct, bc_mode),
+    unsafe_allow_html=True)
+st.write("")
 
 with st.expander("Quick guide", expanded=False):
     st.markdown(
@@ -1357,6 +1500,13 @@ def build_report(rows_extra=None) -> str:
         ("Thermal time constant", f"{tau:.2f} s"),
         ("Applied strain", f"{cfg.strain_pct:.2f} %"),
         ("Regenerator effectiveness", f"{cfg.regen_effectiveness*100:.0f} %"),
+        ("Boundary condition", f"{bc_mode}"),
+        ("Fixed end", f"{bc_fixed_end}"),
+        ("Displacement end", f"{bc_other_end}"),
+        ("Displacement direction",
+         "Compression" if effective_compression else "Tension"),
+        ("Displacement magnitude",
+         f"{cfg.strain * cfg.length_mm:.2f} mm"),
         ("Phase duration", f"{cfg.phase_time_s:.2f} s"),
         ("Ambient", f"{cfg.ambient_c:.1f} °C"),
         ("Target", f"{cfg.target_c:.1f} °C"),
