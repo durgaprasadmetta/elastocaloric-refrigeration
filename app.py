@@ -613,7 +613,7 @@ with st.sidebar:
         "Applied strain (%)", strain_mn, strain_mx, step=0.1, key="w_strain",
         help=f"Transformation plateau ends near {mat.eps_tr * 100:.1f}%.")
     compression = st.toggle("Compressive loading", key="w_compression")
-    phase_time = st.slider("Phase duration (s)", 0.2, 5.0, step=0.1,
+    phase_time = st.slider("Phase duration (s)", 0.2, 60.0, step=0.1,
                            key="w_phase_time")
     eta_act = st.slider("Actuator efficiency", 0.3, 0.95, step=0.05,
                         key="w_eta")
