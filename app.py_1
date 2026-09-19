@@ -489,7 +489,7 @@ def get_theme(dark: bool) -> dict:
 # ---------------------------------------------------------------
 
 DEFAULTS = {
-    "w_theme": False,                # False = light, True = dark
+    "w_theme": True,                # False = light, True = dark
     "w_material": "niti",
     "w_form": "tube",
     "w_n_elements": 5,
