@@ -533,6 +533,20 @@ if st.session_state.get("_do_restore"):
     st.session_state["_do_restore"] = False
     st.session_state["_pending_full_reset"] = True
 
+# Any code that wants to change a "w_*" sidebar setting from a button
+# click (the expert agent, the comparison panel) must NOT write to
+# st.session_state["w_..."] directly from inside that button's handler —
+# by the time that handler runs, the sidebar has already instantiated a
+# widget bound to that key for this script run, and Streamlit raises
+# StreamlitWidgetAlreadyInstantiatedError if you try to overwrite it
+# afterward. Instead those handlers set "_pending_apply" and call
+# st.rerun(); this block picks it up and applies it here, before the
+# sidebar widgets exist for the new run, which is the only point where
+# it's safe to do.
+if st.session_state.get("_pending_apply"):
+    for _k, _v in st.session_state.pop("_pending_apply").items():
+        st.session_state[_k] = _v
+
 # Seed any missing keys (first load only — setdefault is a no-op after).
 for _k, _v in DEFAULTS.items():
     st.session_state.setdefault(_k, _v)
@@ -962,12 +976,14 @@ with st.expander("🧑‍🔬 Ask the material expert", expanded=False):
             with aa1:
                 if st.button("✅ Yes, apply automatically", key="ae_apply",
                              type="primary", use_container_width=True):
-                    st.session_state["w_material"] = best_c.material_key
-                    st.session_state["w_strain"] = best_c.strain_pct
-                    st.session_state["w_phase_time"] = best_c.phase_time_s
-                    st.session_state["w_hx"] = best_c.exchanger_key
-                    st.session_state["w_ambient"] = best_c.ambient_c
-                    st.session_state["w_target"] = best_c.target_c
+                    st.session_state["_pending_apply"] = {
+                        "w_material": best_c.material_key,
+                        "w_strain": best_c.strain_pct,
+                        "w_phase_time": best_c.phase_time_s,
+                        "w_hx": best_c.exchanger_key,
+                        "w_ambient": best_c.ambient_c,
+                        "w_target": best_c.target_c,
+                    }
                     st.session_state["ae_ran"] = False
                     st.session_state["_pending_full_reset"] = True
                     event("Settings applied automatically by the material "
@@ -1066,12 +1082,14 @@ with st.expander("🔬 Test multiple combinations", expanded=False):
                 idx = labels.index(pick)
                 chosen = [r for r in results
                          if r["Reaches target"] == "Yes"][idx]["_cfg"]
-                st.session_state["w_material"] = chosen.material_key
-                st.session_state["w_strain"] = chosen.strain_pct
-                st.session_state["w_phase_time"] = chosen.phase_time_s
-                st.session_state["w_hx"] = chosen.exchanger_key
-                st.session_state["w_ambient"] = chosen.ambient_c
-                st.session_state["w_target"] = chosen.target_c
+                st.session_state["_pending_apply"] = {
+                    "w_material": chosen.material_key,
+                    "w_strain": chosen.strain_pct,
+                    "w_phase_time": chosen.phase_time_s,
+                    "w_hx": chosen.exchanger_key,
+                    "w_ambient": chosen.ambient_c,
+                    "w_target": chosen.target_c,
+                }
                 st.session_state["sw_ran"] = False
                 st.session_state["_pending_full_reset"] = True
                 event("Combination applied from the comparison table.")
