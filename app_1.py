@@ -3,7 +3,7 @@ app.py
 ================================================================================
 "Advanced Elastocaloric Refrigeration Using NiTi Alloy" SCADA/HMI Application
 ================================================================================
-A professional-grade real physics-based simulation, data-acquisition, and 
+An engineering-grade, real physics-based simulation, data-acquisition, and 
 SCADA/HMI research application developed for Mechanical Engineering projects.
 Monitors coupled thermomechanical, structural, air-side convective transport, 
 and closed environmental chamber thermal energy balances.
