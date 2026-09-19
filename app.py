@@ -120,6 +120,8 @@ class Config:
     insulation_ua: float = 0.35
     actuator_efficiency: float = 0.70
     regen_effectiveness: float = 0.0   # 0 = no regenerator (original model)
+    custom_area_mm2: float = 50.0      # used only when form == "custom"
+    custom_perimeter_mm: float = 30.0  # used only when form == "custom"
 
     @property
     def material(self) -> Material:
@@ -135,6 +137,15 @@ class Config:
 
     @property
     def section_area(self) -> float:
+        """
+        Cross-sectional area of the whole bundle, m2. Not hard-coded to
+        one geometry: tube and wire are computed from diameters, and
+        "custom" takes the person's own measured or specified area
+        directly, so the physics below adapts to whatever element the
+        person actually has rather than forcing a predefined shape.
+        """
+        if self.form == "custom":
+            return self.custom_area_mm2 * 1e-6 * self.n_elements
         od = self.od_mm * 1e-3
         idm = min(self.id_mm, self.od_mm - 0.2) * 1e-3
         a = (math.pi / 4.0 * od ** 2 if self.form == "wire"
@@ -155,6 +166,11 @@ class Config:
 
     @property
     def wetted_area(self) -> float:
+        """Heat-transfer surface, m2 — same custom-geometry adaptation
+        as section_area above."""
+        if self.form == "custom":
+            return (self.custom_perimeter_mm * 1e-3 * self.length_mm
+                    * 1e-3 * self.n_elements)
         od = self.od_mm * 1e-3
         idm = min(self.id_mm, self.od_mm - 0.2) * 1e-3
         per = math.pi * od if self.form == "wire" else math.pi * (od + idm)
@@ -374,55 +390,6 @@ def check_interlocks(cfg: Config, s: State) -> List[Tuple[str, str]]:
     return out
 
 
-def sweep_combinations(base_cfg, materials, exchangers, strain_fracs,
-                       phase_times, target_temp, ambient):
-    """
-    Batch-tests every combination of material x exchanger x strain-fraction
-    x phase-time against a single target/ambient, using the current rig
-    geometry. Returns a list of result dicts, sorted best-time-first among
-    combinations that can reach the target, with unreachable combinations
-    listed afterward so the person can see what does NOT work too.
-    """
-    rows = []
-    for mat_key in materials:
-        mat = MATERIALS[mat_key]
-        for frac in strain_fracs:
-            strain = round(mat.eps_tr * 100 * frac, 2)
-            for hx in exchangers:
-                for phase in phase_times:
-                    c = replace(base_cfg, material_key=mat_key,
-                               exchanger_key=hx, strain_pct=strain,
-                               phase_time_s=phase, ambient_c=ambient,
-                               target_c=target_temp)
-                    # Capped cycle budget: this only affects how long we
-                    # search before giving up on a losing combination, not
-                    # the accuracy of the reachable ones (those converge
-                    # in well under 100 cycles in practice).
-                    e = predict_envelope(c, max_cycles=1200)
-                    rows.append({
-                        "Material": mat.name,
-                        "Exchanger": EXCHANGERS[hx].name,
-                        "Strain (%)": strain,
-                        "Phase (s)": phase,
-                        "Reaches target": "Yes" if e["reachable"] else "No",
-                        "Sustainable min (°C)": round(e["t_min_c"], 1),
-                        "Cycles to target": (round(e["cycles_to_target"])
-                                             if e["reachable"] else None),
-                        "Time to target (min)": (
-                            round(e["time_to_target_s"] / 60, 1)
-                            if e["reachable"] else None),
-                        "Steady COP": round(e["steady_cop"], 2),
-                        "Steady duty (W)": round(e["steady_lift_w"], 1),
-                        "_cfg": c,
-                    })
-    reachable = [r for r in rows if r["Reaches target"] == "Yes"]
-    unreachable = [r for r in rows if r["Reaches target"] == "No"]
-    reachable.sort(key=lambda r: r["Time to target (min)"])
-    unreachable.sort(key=lambda r: -r["Sustainable min (°C)"] if
-                     target_temp >= 0 else r["Sustainable min (°C)"])
-    return reachable + unreachable
-
-
 def search_recommendation(base_cfg, material_key, target_temp, ambient,
                           max_strain_pct=None, prefer_speed=True):
     """
@@ -494,6 +461,8 @@ DEFAULTS = {
                                       # touches this key (see _THEME_KEY).
     "w_material": "niti",
     "w_form": "tube",
+    "w_custom_area": 50.0,
+    "w_custom_perimeter": 30.0,
     "w_n_elements": 5,
     "w_length": 150.0,
     "w_od": 12.0,
@@ -509,7 +478,7 @@ DEFAULTS = {
     "w_bc_disp_mm": round(
         150.0 * (MATERIALS["niti"].eps_tr * 100 * 0.9) / 100, 2),
     "w_compression": False,
-    "w_phase_time": 0.8,
+    "w_phase_time": 10.0,
     "w_eta": 0.70,
     "w_hx": "finned_air",
     "w_flow": 50.0,
@@ -539,7 +508,7 @@ if st.session_state.get("_do_restore"):
     # factory reset genuinely clears the whole screen, not just the
     # sidebar sliders.
     for _k in list(st.session_state.keys()):
-        if _k.startswith("ae_") or _k.startswith("sw_"):
+        if _k.startswith("ae_"):
             del st.session_state[_k]
     st.session_state["_do_restore"] = False
     st.session_state["_pending_full_reset"] = True
@@ -605,16 +574,34 @@ with st.sidebar:
                            format_func=lambda k: MATERIALS[k].name,
                            key="w_material")
     mat = MATERIALS[mat_key]
-    form = st.radio("Element form", ["tube", "wire"], horizontal=True,
-                    key="w_form")
+    form = st.radio("Element form", ["tube", "wire", "custom"],
+                    horizontal=True, key="w_form",
+                    help="Tube and wire compute cross-section and surface "
+                         "area from diameters. Custom lets you enter a "
+                         "measured or specified area directly, for "
+                         "geometries that don't fit either preset.")
     n_elements = st.number_input("Elements in bundle", 1, 40, step=1,
                                  key="w_n_elements")
     length_mm = st.number_input("Active length (mm)", 20.0, 500.0, step=5.0,
                                 key="w_length")
-    od_mm = st.number_input("Outer diameter (mm)", 0.5, 30.0, step=0.5,
-                            key="w_od")
-    id_mm = st.number_input("Bore diameter (mm)", 0.1, 29.0, step=0.5,
-                            disabled=(form == "wire"), key="w_id")
+    if form == "custom":
+        custom_area_mm2 = st.number_input(
+            "Cross-section area, per element (mm²)", 0.5, 500.0, step=1.0,
+            key="w_custom_area",
+            help="The load-bearing cross-section of one element.")
+        custom_perimeter_mm = st.number_input(
+            "Wetted perimeter, per element (mm)", 0.5, 200.0, step=1.0,
+            key="w_custom_perimeter",
+            help="The perimeter exposed to the coolant, per element.")
+        od_mm, id_mm = 12.0, 10.0   # unused in this branch; kept as a
+                                    # stable default so Config always has
+                                    # a valid value regardless of form.
+    else:
+        custom_area_mm2, custom_perimeter_mm = 50.0, 30.0
+        od_mm = st.number_input("Outer diameter (mm)", 0.5, 30.0, step=0.5,
+                                key="w_od")
+        id_mm = st.number_input("Bore diameter (mm)", 0.1, 29.0, step=0.5,
+                                disabled=(form == "wire"), key="w_id")
 
     st.markdown("### Boundary Conditions")
     st.caption(
@@ -681,7 +668,7 @@ with st.sidebar:
                             disabled=_bc_overrides_loading)
     if _bc_overrides_loading:
         st.caption("↑ Controlled by Boundary Conditions above.")
-    phase_time = st.slider("Phase duration (s)", 0.2, 5.0, step=0.1,
+    phase_time = st.slider("Phase duration (s)", 0.2, 60.0, step=0.1,
                            key="w_phase_time")
     eta_act = st.slider("Actuator efficiency", 0.3, 0.95, step=0.05,
                         key="w_eta")
@@ -895,7 +882,9 @@ cfg = Config(material_key=mat_key, exchanger_key=hx_key, form=form,
              phase_time_s=phase_time, flow_cfm=flow_cfm, ambient_c=ambient_c,
              target_c=target_c, chamber_capacity=chamber_cap,
              insulation_ua=insulation_ua, actuator_efficiency=eta_act,
-             regen_effectiveness=regen_eff)
+             regen_effectiveness=regen_eff,
+             custom_area_mm2=custom_area_mm2,
+             custom_perimeter_mm=custom_perimeter_mm)
 
 # --- run-time session state (separate from the widget/config state) ----
 MAX_POINTS = 2400
@@ -986,6 +975,19 @@ def envelope(cfg_key: tuple):
 
 env = envelope(tuple(getattr(cfg, f.name) for f in fields(cfg)))
 
+# Computed here (not later, where they were previously) so the AI
+# Engineering Assistant glossary below — which explains phase duration
+# using these exact numbers — has them available.
+tau = cfg.capacity / cfg.ua_hx if cfg.ua_hx > 0 else float("inf")
+effectiveness = 1.0 - math.exp(-cfg.phase_time_s / tau) if tau > 0 else 0.0
+
+# Also computed here, early, for the same reason as tau/effectiveness
+# above — the AI Engineering Assistant glossary and the active-config
+# summary both reference this before the old "live readouts" section
+# (which used to be the only place it was computed) has run.
+q_tot, w_tot = st.session_state.energy
+avg_cop = q_tot / w_tot if w_tot > 0 else 0.0
+
 st.markdown(f"""
 <div class="titlebar"><h1>Elastocaloric refrigeration rig</h1>
 <span>{mat.name} &nbsp;·&nbsp; {EXCHANGERS[hx_key].name}
@@ -1049,6 +1051,35 @@ st.markdown(render_boundary_diagram(
     theme, bc_fixed_end, effective_compression,
     cfg.strain * cfg.length_mm, effective_strain_pct, bc_mode),
     unsafe_allow_html=True)
+
+# ---------------------------------------------------------------------
+# ACTIVE CONFIGURATION — the values actually in effect right now, as
+# opposed to whatever a sidebar widget happens to show. In this app's
+# architecture there's no separate "staged, not yet applied" state:
+# every sidebar control takes effect on the very next script run, so
+# these numbers ARE what's live. Shown here so the main screen states
+# them plainly rather than requiring a trip to the sidebar to confirm.
+# ---------------------------------------------------------------------
+_direction_label = "Compression" if effective_compression else "Tension"
+_form_label = {"tube": "Tube", "wire": "Wire", "custom": "Custom"}.get(
+    cfg.form, cfg.form.title())
+active_rows = [
+    ("Element", f"{_form_label} · {cfg.n_elements} × {cfg.length_mm:.0f} mm"),
+    ("Phase duration", f"{cfg.phase_time_s:.1f} s"),
+    ("Displacement", f"{cfg.strain * cfg.length_mm:.2f} mm ({_direction_label})"),
+    ("Target temperature", f"{cfg.target_c:.1f} °C"),
+    ("Ambient temperature", f"{cfg.ambient_c:.1f} °C"),
+]
+st.markdown(
+    f'<div style="background:{theme["PAPER"]};border:1px solid '
+    f'{theme["LINE"]};border-radius:6px;padding:10px 18px;margin-top:8px;'
+    f'display:flex;flex-wrap:wrap;gap:22px;font-size:12.5px;'
+    f'color:{theme["STEEL"]}">' +
+    "".join(
+        f'<span><b style="color:{theme["INK"]}">{label}:</b> {value}</span>'
+        for label, value in active_rows
+    ) + '</div>', unsafe_allow_html=True)
+st.caption("↑ Currently active — set in the sidebar, applied immediately.")
 st.write("")
 
 with st.expander("Quick guide", expanded=False):
@@ -1069,7 +1100,88 @@ with st.expander("Quick guide", expanded=False):
         "highest and lowest temperature reached since the last reset."
     )
 
-with st.expander("🧑‍🔬 Ask the material expert", expanded=False):
+with st.expander("🤖 AI Engineering Assistant", expanded=False):
+    st.caption(
+        "Rule-based — reads this app's own physics engine and live state "
+        "directly, so it can't invent a wrong number, but it also can't "
+        "hold a free-form conversation or read an uploaded file/image "
+        "(that needs a connected AI model, which this deployment doesn't "
+        "have configured)."
+    )
+
+    st.markdown("#### Beginner mode — what does this do?")
+    GLOSSARY = {
+        "Phase duration": lambda: (
+            f"How long each of the four steps (load, reject heat, unload, "
+            f"absorb heat) runs before moving to the next. Right now it's "
+            f"**{cfg.phase_time_s:.1f} s**. Your element's own thermal time "
+            f"constant is **{tau:.1f} s**, so at the current setting only "
+            f"about **{effectiveness*100:.0f}%** of the available "
+            f"temperature swing is transferred each phase — shorter phases "
+            f"run more cycles per minute but move less heat each time; "
+            f"longer phases move more heat per cycle but pull down slower "
+            f"in wall-clock time."),
+        "Applied strain / displacement": lambda: (
+            f"How far the element is mechanically stretched or compressed. "
+            f"Right now that's **{effective_strain_pct:.2f}%** strain, "
+            f"which is **{cfg.strain * cfg.length_mm:.2f} mm** of "
+            f"displacement on a {cfg.length_mm:.0f} mm element. This "
+            f"directly sets the adiabatic temperature swing "
+            f"(**{env['dt_adiabatic']:.1f} K** at present) — more strain "
+            f"means more cooling per cycle, up to the material's "
+            f"transformation plateau at {mat.eps_tr*100:.1f}%; beyond "
+            f"that you get no extra cooling, only extra stress."),
+        "Fixed / Displacement ends": lambda: (
+            f"One end of the element must stay still (**Fixed: "
+            f"{bc_fixed_end}**) so the mechanical stroke has something to "
+            f"push or pull against; the opposite end "
+            f"(**Displacement: {bc_other_end}**) is the one actually "
+            f"moved to strain the material. Without a fixed reference "
+            f"end, 'displacement' wouldn't mean anything — both ends "
+            f"would just move together."),
+        "Target temperature": lambda: (
+            f"The chamber temperature the controller is trying to reach — "
+            f"currently **{cfg.target_c:.1f} °C**, against an ambient of "
+            f"**{cfg.ambient_c:.1f} °C**. The verdict banner above tells "
+            f"you directly whether this configuration can physically "
+            f"reach it, and if not, by how much it falls short."),
+        "Exchanger": lambda: (
+            f"How heat actually moves between the element and its "
+            f"surroundings — currently **{EXCHANGERS[hx_key].name}**, "
+            f"giving a conductance of **{cfg.ua_hx:.1f} W/K**. Higher "
+            f"conductance pulls down faster but also lets the element "
+            f"return closer to ambient each cycle, which raises the "
+            f"floor temperature it can ultimately sustain."),
+        "Regenerator effectiveness": lambda: (
+            f"Recycles heat between the hot and cold halves of the cycle "
+            f"so the machine can pump across a span larger than one "
+            f"element's own adiabatic swing. Currently set to "
+            f"**{cfg.regen_effectiveness*100:.0f}%**"
+            + (", i.e. off — a single element with no heat recycling."
+               if cfg.regen_effectiveness == 0 else
+               f", multiplying the effective swing by "
+               f"×{cfg.regen_gain:.2f}.")),
+        "COP (coefficient of performance)": lambda: (
+            f"Cooling energy delivered divided by work put in. Right now "
+            f"the run-average is **{avg_cop:.2f}** — below 1 is normal "
+            f"for a single-stage, non-regenerative elastocaloric cycle "
+            f"like this one; refrigerators you buy are usually 2-4 "
+            f"because they're highly optimized multi-stage systems."),
+        "Why a graph/number looks wrong": lambda: (
+            "Most often this means the configuration genuinely can't do "
+            "what's being asked of it — check the verdict banner near the "
+            "top first. If chamber temperature is flat, either the target "
+            "was already reached (see the green banner) or the machine "
+            "hit its physical floor (see 'Sustainable minimum' in the key "
+            "figures row)."),
+    }
+    glossary_pick = st.selectbox(
+        "Pick a control or concept to have it explained using your "
+        "current numbers:", list(GLOSSARY), key="ai_glossary_pick")
+    st.info(GLOSSARY[glossary_pick]())
+
+    st.divider()
+    st.markdown("#### Recommend settings for a target")
     st.markdown(
         "Tell me the material and the temperature you're trying to reach. "
         "I'll search for settings that can actually get there, show you the "
@@ -1144,106 +1256,6 @@ with st.expander("🧑‍🔬 Ask the material expert", expanded=False):
                              use_container_width=True):
                     st.info("No problem — use the values listed above.")
 
-with st.expander("🔬 Test multiple combinations", expanded=False):
-    st.markdown(
-        "Pick several materials, exchangers, strains and phase durations "
-        "and I'll run every combination against one target, then rank them "
-        "so you can see which setups actually work and which are fastest "
-        "or most efficient. This keeps your current bundle geometry."
-    )
-    sw1, sw2 = st.columns(2)
-    with sw1:
-        sw_materials = st.multiselect(
-            "Materials to test", list(MATERIALS),
-            default=list(MATERIALS),
-            format_func=lambda k: MATERIALS[k].name, key="sw_materials")
-        sw_exchangers = st.multiselect(
-            "Exchangers to test", list(EXCHANGERS),
-            default=list(EXCHANGERS),
-            format_func=lambda k: EXCHANGERS[k].name, key="sw_exchangers")
-    with sw2:
-        sw_strain_fracs = st.multiselect(
-            "Strain, as a fraction of each material's plateau",
-            [0.5, 0.75, 1.0], default=[0.5, 0.75, 1.0],
-            format_func=lambda f: f"{f*100:.0f}%", key="sw_strain_fracs")
-        sw_phase_times = st.multiselect(
-            "Phase durations to test (s)", [0.5, 1.0, 2.0, 3.0],
-            default=[0.5, 1.0, 2.0], key="sw_phase_times")
-
-    sw3, sw4 = st.columns(2)
-    with sw3:
-        sw_target = st.number_input(
-            "Target for this comparison (°C)", -40.0, 40.0, 5.0, 1.0,
-            key="sw_target")
-    with sw4:
-        sw_ambient = st.number_input(
-            "Ambient for this comparison (°C)", 5.0, 45.0, 25.0, 1.0,
-            key="sw_ambient")
-
-    n_combos = (len(sw_materials) * len(sw_exchangers)
-               * len(sw_strain_fracs) * len(sw_phase_times))
-    st.caption(f"{n_combos} combinations will be simulated." if n_combos
-              else "Select at least one option in each list.")
-
-    if st.button("Run comparison", key="sw_go", disabled=(n_combos == 0)):
-        with st.spinner(f"Simulating {n_combos} combinations..."):
-            st.session_state["sw_results"] = sweep_combinations(
-                cfg, sw_materials, sw_exchangers, sw_strain_fracs,
-                sw_phase_times, sw_target, sw_ambient)
-        st.session_state["sw_ran"] = True
-
-    if st.session_state.get("sw_ran"):
-        results = st.session_state.get("sw_results", [])
-        n_ok = sum(1 for r in results if r["Reaches target"] == "Yes")
-        if n_ok == 0:
-            st.error(
-                f"None of the {len(results)} combinations tested can hold "
-                f"{sw_target:.1f} °C on this rig's current geometry. The "
-                "table below still shows how close each one gets — the "
-                "closest may point to what to change (bigger bundle, more "
-                "strain headroom, a different material)."
-            )
-        else:
-            st.success(f"{n_ok} of {len(results)} combinations can hold "
-                      f"{sw_target:.1f} °C. Best is listed first.")
-
-        table_rows = [{k: v for k, v in r.items() if k != "_cfg"}
-                     for r in results]
-        sw_frame = pd.DataFrame(table_rows)
-        st.dataframe(sw_frame, use_container_width=True, hide_index=True)
-
-        st.download_button(
-            "Download comparison (CSV)",
-            sw_frame.to_csv(index=False).encode(),
-            f"ecx_comparison_{datetime.now():%Y%m%d_%H%M}.csv",
-            "text/csv", key="sw_download")
-
-        if n_ok > 0:
-            labels = [
-                f"{r['Material']} · {r['Exchanger']} · {r['Strain (%)']}% "
-                f"· {r['Phase (s)']}s  —  "
-                f"{r['Time to target (min)']} min, COP {r['Steady COP']}"
-                for r in results if r["Reaches target"] == "Yes"
-            ]
-            pick = st.selectbox("Apply one of these to the rig:", labels,
-                                key="sw_pick")
-            if st.button("✅ Apply selected combination", key="sw_apply",
-                         type="primary"):
-                idx = labels.index(pick)
-                chosen = [r for r in results
-                         if r["Reaches target"] == "Yes"][idx]["_cfg"]
-                st.session_state["_pending_apply"] = {
-                    "w_material": chosen.material_key,
-                    "w_strain": chosen.strain_pct,
-                    "w_phase_time": chosen.phase_time_s,
-                    "w_hx": chosen.exchanger_key,
-                    "w_ambient": chosen.ambient_c,
-                    "w_target": chosen.target_c,
-                }
-                st.session_state["sw_ran"] = False
-                st.session_state["_pending_full_reset"] = True
-                event("Combination applied from the comparison table.")
-                st.rerun()
 
 if env["reachable"]:
     headline = f"This configuration can hold {cfg.target_c:.1f} °C."
@@ -1264,9 +1276,6 @@ else:
 
 st.markdown(f'<div class="verdict {"" if env["reachable"] else "blocked"}">'
             f'<h2>{headline}</h2><p>{body}</p></div>', unsafe_allow_html=True)
-
-tau = cfg.capacity / cfg.ua_hx if cfg.ua_hx > 0 else float("inf")
-effectiveness = 1.0 - math.exp(-cfg.phase_time_s / tau) if tau > 0 else 0.0
 
 for col, cap, value, unit in zip(
         st.columns(5),
@@ -1376,9 +1385,6 @@ for i in range(1, 5):
 st.write("")
 
 # --- live readouts -------------------------------------------------
-q_tot, w_tot = st.session_state.energy
-avg_cop = q_tot / w_tot if w_tot > 0 else 0.0
-
 for col, (cap, value, unit) in zip(st.columns(6), [
         ("Cold box", f"{state.t_chamber:.2f}", "°C"),
         ("Element", f"{state.t_element:.2f}", "°C"),
@@ -1460,8 +1466,20 @@ with h1:
 
 with h2:
     st.markdown("**Controller log**")
-    st.code("\n".join(st.session_state.events) or "No events yet.",
-            language="text")
+    _log_lines = st.session_state.events or ["No events yet."]
+    _log_html = "<br>".join(
+        f'<span style="color:{theme["STEEL"]}">{ln.split("  ", 1)[0]}</span>'
+        f'&nbsp;&nbsp;{ln.split("  ", 1)[1] if "  " in ln else ln}'
+        if "  " in ln else ln
+        for ln in _log_lines
+    )
+    st.markdown(
+        f'<div style="background:{theme["PAPER"]};border:1px solid '
+        f'{theme["LINE"]};border-radius:6px;padding:12px 14px;'
+        f'max-height:220px;overflow-y:auto;font-family:\'IBM Plex Mono\','
+        f'monospace;font-size:12px;line-height:1.7;color:{theme["INK"]}">'
+        f'{_log_html}</div>',
+        unsafe_allow_html=True)
 
 # --- automatic sequencer: one screen update per N cycles ------------
 if auto_mode and st.session_state.get("running") and not state.target_reached:
