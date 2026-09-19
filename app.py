@@ -119,6 +119,7 @@ class Config:
     chamber_capacity: float = 800.0
     insulation_ua: float = 0.35
     actuator_efficiency: float = 0.70
+    regen_effectiveness: float = 0.0   # 0 = no regenerator (original model)
 
     @property
     def material(self) -> Material:
@@ -177,10 +178,27 @@ class Config:
         return 9.0 * self.wetted_area
 
     @property
+    def regen_gain(self) -> float:
+        """
+        Span-extension factor from regeneration, capped at 5x (80%
+        effectiveness). This is a simplified proxy — real counter-flow
+        AMR-style regenerator analysis is more involved — but it captures
+        the qualitative effect correctly: recycling sensible heat between
+        the hot and cold halves of the cycle lets the machine pump across
+        a span larger than a single element's adiabatic swing, and the
+        gain grows sharply as effectiveness approaches 1.
+        """
+        eps = min(max(self.regen_effectiveness, 0.0), 0.8)
+        return 1.0 / (1.0 - eps)
+
+    def effective_dt_adiabatic(self, t_c: float) -> float:
+        return self.material.dt_adiabatic(t_c, self.strain) * self.regen_gain
+
+    @property
     def floor_c(self) -> float:
-        """Ideal single-stage floor: ambient minus the adiabatic swing."""
-        return self.ambient_c - self.material.dt_adiabatic(
-            self.ambient_c, self.strain)
+        """Ideal single-stage floor: ambient minus the (regen-boosted)
+        adiabatic swing."""
+        return self.ambient_c - self.effective_dt_adiabatic(self.ambient_c)
 
     @property
     def pump_power(self) -> float:
@@ -239,7 +257,7 @@ def step_phase(cfg: Config, st_in: State, phase: int,
 
     if phase == 1:
         s.strain_pct = cfg.strain_pct
-        s.t_element += mat.dt_adiabatic(s.t_element, cfg.strain)
+        s.t_element += cfg.effective_dt_adiabatic(s.t_element)
         s.stress_mpa = mat.plateau_stress_mpa(s.t_element) + \
             mat.sigma_hyst_mpa / 2.0
     elif phase == 2:
@@ -248,7 +266,7 @@ def step_phase(cfg: Config, st_in: State, phase: int,
             mat.sigma_hyst_mpa / 2.0
     elif phase == 3:
         s.strain_pct = 0.0
-        s.t_element -= mat.dt_adiabatic(s.t_element, cfg.strain)
+        s.t_element -= cfg.effective_dt_adiabatic(s.t_element)
         s.stress_mpa = max(0.0, mat.plateau_stress_mpa(s.t_element)
                            - mat.sigma_hyst_mpa / 2.0)
     else:
@@ -326,7 +344,7 @@ def predict_envelope(cfg: Config, max_cycles: int = 4000) -> Dict[str, float]:
         "steady_lift_w": s.q_cold_rate,
         "cycles_simulated": n,
         "reachable": s.t_chamber <= cfg.target_c + 1e-6,
-        "dt_adiabatic": cfg.material.dt_adiabatic(cfg.ambient_c, cfg.strain),
+        "dt_adiabatic": cfg.effective_dt_adiabatic(cfg.ambient_c),
     }
 
 
@@ -354,6 +372,55 @@ def check_interlocks(cfg: Config, s: State) -> List[Tuple[str, str]]:
         out.append(("warn", f"Cycle count is past the indicative fatigue "
                             f"life ({mat.fatigue_cycles:,})."))
     return out
+
+
+def sweep_combinations(base_cfg, materials, exchangers, strain_fracs,
+                       phase_times, target_temp, ambient):
+    """
+    Batch-tests every combination of material x exchanger x strain-fraction
+    x phase-time against a single target/ambient, using the current rig
+    geometry. Returns a list of result dicts, sorted best-time-first among
+    combinations that can reach the target, with unreachable combinations
+    listed afterward so the person can see what does NOT work too.
+    """
+    rows = []
+    for mat_key in materials:
+        mat = MATERIALS[mat_key]
+        for frac in strain_fracs:
+            strain = round(mat.eps_tr * 100 * frac, 2)
+            for hx in exchangers:
+                for phase in phase_times:
+                    c = replace(base_cfg, material_key=mat_key,
+                               exchanger_key=hx, strain_pct=strain,
+                               phase_time_s=phase, ambient_c=ambient,
+                               target_c=target_temp)
+                    # Capped cycle budget: this only affects how long we
+                    # search before giving up on a losing combination, not
+                    # the accuracy of the reachable ones (those converge
+                    # in well under 100 cycles in practice).
+                    e = predict_envelope(c, max_cycles=1200)
+                    rows.append({
+                        "Material": mat.name,
+                        "Exchanger": EXCHANGERS[hx].name,
+                        "Strain (%)": strain,
+                        "Phase (s)": phase,
+                        "Reaches target": "Yes" if e["reachable"] else "No",
+                        "Sustainable min (°C)": round(e["t_min_c"], 1),
+                        "Cycles to target": (round(e["cycles_to_target"])
+                                             if e["reachable"] else None),
+                        "Time to target (min)": (
+                            round(e["time_to_target_s"] / 60, 1)
+                            if e["reachable"] else None),
+                        "Steady COP": round(e["steady_cop"], 2),
+                        "Steady duty (W)": round(e["steady_lift_w"], 1),
+                        "_cfg": c,
+                    })
+    reachable = [r for r in rows if r["Reaches target"] == "Yes"]
+    unreachable = [r for r in rows if r["Reaches target"] == "No"]
+    reachable.sort(key=lambda r: r["Time to target (min)"])
+    unreachable.sort(key=lambda r: -r["Sustainable min (°C)"] if
+                     target_temp >= 0 else r["Sustainable min (°C)"])
+    return reachable + unreachable
 
 
 def search_recommendation(base_cfg, material_key, target_temp, ambient,
@@ -439,15 +506,30 @@ DEFAULTS = {
     "w_target": 10.0,
     "w_chamber_cap": 800.0,
     "w_insulation": 0.35,
+    "w_regen": 0.0,
     "w_auto": True,
     "w_cycles_update": 4,
 }
 
 # If a factory-reset was requested on the previous run, apply it now,
 # BEFORE any widget is instantiated, so every control snaps back.
+# Display preference, not a rig setting — a reset should never change
+# how the screen looks, only what it's simulating. Kept out of the
+# factory-restore loop below on purpose.
+_THEME_KEY = "w_theme"
+
 if st.session_state.get("_do_restore"):
     for _k, _v in DEFAULTS.items():
+        if _k == _THEME_KEY:
+            continue
         st.session_state[_k] = _v
+    # Also wipe anything the material expert or the combination-comparison
+    # panel left behind (their result tables, picks, prior inputs), so a
+    # factory reset genuinely clears the whole screen, not just the
+    # sidebar sliders.
+    for _k in list(st.session_state.keys()):
+        if _k.startswith("ae_") or _k.startswith("sw_"):
+            del st.session_state[_k]
     st.session_state["_do_restore"] = False
     st.session_state["_pending_full_reset"] = True
 
@@ -477,9 +559,11 @@ with st.sidebar:
     st.markdown("### Reset")
     if st.button("↺ Restore factory defaults", use_container_width=True,
                  type="primary",
-                 help="Resets EVERY setting — material, geometry, loading, "
-                      "exchanger, thermal, control mode — and clears the "
-                      "run. Use this if the rig is in a confusing state."):
+                 help="Resets every rig setting — material, geometry, "
+                      "loading, exchanger, thermal, control mode — and "
+                      "clears the run. Your dark/light theme choice is a "
+                      "display preference, not a rig setting, so it is "
+                      "left untouched."):
         st.session_state["_do_restore"] = True
         st.rerun()
     st.caption(
@@ -539,6 +623,20 @@ with st.sidebar:
     insulation_ua = st.number_input("Cabinet loss (W/K)", 0.05, 5.0,
                                     step=0.05, key="w_insulation")
 
+    st.markdown("### Advanced")
+    regen_eff = st.slider(
+        "Regenerator effectiveness", 0.0, 0.8, step=0.05, key="w_regen",
+        help="0 = no regenerator (a single element, exactly as before). "
+             "Recycling heat between the hot and cold halves of the cycle "
+             "lets the machine pump across a span far larger than one "
+             "element's own adiabatic swing — this is the single biggest "
+             "lever for reaching colder targets or raising COP, more "
+             "effective than strain, exchanger choice or phase timing "
+             "alone.")
+    if regen_eff > 0:
+        st.caption(f"Effective temperature swing is being multiplied "
+                  f"×{1/(1-min(regen_eff,0.8)):.2f} by the regenerator.")
+
     st.markdown("### Control")
     auto_mode = st.toggle("Automatic sequencing", key="w_auto")
     cycles_per_update = st.slider("Cycles per screen update", 1, 20,
@@ -549,10 +647,59 @@ theme = get_theme(dark_mode)
 st.markdown(f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+
+/* Tell Streamlit's own components (labels, captions, sidebar text,
+   buttons, widget option text) which colors to use. These CSS custom
+   properties are what Streamlit's native widgets actually read from —
+   setting color on html/body alone does not reach them, which is why
+   text could go white-on-white after switching themes. */
+:root, .stApp {{
+    --text-color: {theme["INK"]};
+    --background-color: {theme["APP_BG"]};
+    --secondary-background-color: {theme["PAPER"]};
+}}
+
 html, body, [class*="css"] {{ font-family:'IBM Plex Sans',system-ui,sans-serif;
   color:{theme["INK"]}; }}
 .stApp {{ background:{theme["APP_BG"]}; }}
 .block-container {{ max-width:1480px; padding-top:1.2rem; }}
+
+/* Explicit safety net: force every native Streamlit text element to
+   the current theme's ink color, regardless of what the browser's own
+   light/dark preference or a previous render left behind. */
+section[data-testid="stSidebar"] {{
+    background:{theme["APP_BG"]};
+}}
+section[data-testid="stSidebar"] label,
+section[data-testid="stSidebar"] p,
+section[data-testid="stSidebar"] span,
+section[data-testid="stSidebar"] div[data-testid="stMarkdownContainer"] {{
+    color:{theme["INK"]} !important;
+}}
+[data-testid="stWidgetLabel"] p,
+[data-testid="stWidgetLabel"] label,
+[data-testid="stMarkdownContainer"] p,
+[data-testid="stMarkdownContainer"] li,
+[data-testid="stMarkdownContainer"] strong,
+[data-testid="stCaptionContainer"],
+[data-testid="stCaptionContainer"] p,
+[data-testid="stExpander"] summary,
+[data-testid="stExpander"] summary p,
+[data-testid="stRadio"] label p,
+[data-testid="stSelectbox"] label p,
+[data-testid="stNumberInput"] label p,
+[data-testid="stSlider"] label p {{
+    color:{theme["INK"]} !important;
+}}
+/* Radio / selectbox option text and dropdown menus */
+div[role="radiogroup"] label span,
+li[role="option"], div[data-baseweb="select"] * {{
+    color:{theme["INK"]} !important;
+}}
+/* Secondary (non-primary) buttons should read in ink, not a stuck white */
+.stButton button[kind="secondary"] p {{
+    color:{theme["INK"]} !important;
+}}
 .titlebar {{ display:flex; align-items:baseline; gap:18px;
   border-bottom:2px solid {theme["INK"]}; padding-bottom:10px; margin-bottom:22px; }}
 .titlebar h1 {{ font-size:24px; font-weight:600; color:{theme["INK"]}; margin:0; }}
@@ -583,6 +730,64 @@ html, body, [class*="css"] {{ font-family:'IBM Plex Sans',system-ui,sans-serif;
 .extreme {{ background:{theme["PAPER"]}; border:1px solid {theme["LINE"]};
   border-radius:4px; padding:10px 14px; }}
 footer, #MainMenu {{ visibility:hidden; }}
+
+/* -----------------------------------------------------------------
+   THEME ENFORCEMENT
+   Streamlit renders some elements (dropdown menus, multiselect popovers,
+   tags) in a portal attached to the page body rather than inside this
+   app's own container, and Streamlit has its own separate light/dark
+   setting that can silently disagree with this toggle. Both are forced
+   below with !important so text can never end up matching its own
+   background regardless of what the browser or a prior render left
+   behind. Rules here are written to be no more specific than a single
+   class + universal selector, so the app's own semantic colors above
+   (.figure, .chip, .verdict, .step) — being more specific selectors —
+   still win where they're meant to.
+   ------------------------------------------------------------------ */
+.stApp, .stApp * {{ color:{theme["INK"]} !important; }}
+/* These are more specific than ".stApp *" above (two classes beats one
+   class + universal), so they win automatically without needing to
+   "undo" the blanket rule first. */
+.figure {{ color:{theme["INK"]} !important; }}
+.figure small {{ color:{theme["STEEL"]} !important; }}
+.cap {{ color:{theme["STEEL"]} !important; }}
+.verdict h2 {{ color:{theme["INK"]} !important; }}
+.verdict p {{ color:{theme["STEEL"]} !important; }}
+.step .n {{ color:{theme["STEEL"]} !important; }}
+.step .t {{ color:{theme["INK"]} !important; }}
+.step .d {{ color:{theme["STEEL"]} !important; }}
+.chip.run {{ color:{theme["WARM"]} !important; }}
+.chip.hold {{ color:{theme["GOOD"]} !important; }}
+.chip.idle {{ color:{theme["STEEL"]} !important; }}
+
+section[data-testid="stSidebar"] {{ background:{theme["APP_BG"]} !important; }}
+
+/* Dropdown / multiselect popovers are portalled to <body>, outside
+   .stApp, so they need their own explicit background + text pairing. */
+div[data-baseweb="popover"],
+div[data-baseweb="popover"] ul,
+ul[role="listbox"] {{
+    background:{theme["PAPER"]} !important;
+}}
+div[data-baseweb="popover"] *,
+li[role="option"],
+div[data-baseweb="tag"] {{
+    color:{theme["INK"]} !important;
+}}
+li[role="option"]:hover,
+li[aria-selected="true"] {{
+    background:{hex_to_rgba(theme["COLD"], 0.14)} !important;
+}}
+div[data-baseweb="tag"] {{
+    background:{hex_to_rgba(theme["COLD"], 0.18)} !important;
+}}
+
+/* Inputs, selects and their placeholder/value text */
+input, textarea,
+div[data-baseweb="select"] > div {{
+    background:{theme["PAPER"]} !important;
+    color:{theme["INK"]} !important;
+}}
 </style>
 """, unsafe_allow_html=True)
 
@@ -591,7 +796,8 @@ cfg = Config(material_key=mat_key, exchanger_key=hx_key, form=form,
              id_mm=id_mm, strain_pct=strain_pct, mode_compression=compression,
              phase_time_s=phase_time, flow_cfm=flow_cfm, ambient_c=ambient_c,
              target_c=target_c, chamber_capacity=chamber_cap,
-             insulation_ua=insulation_ua, actuator_efficiency=eta_act)
+             insulation_ua=insulation_ua, actuator_efficiency=eta_act,
+             regen_effectiveness=regen_eff)
 
 # --- run-time session state (separate from the widget/config state) ----
 MAX_POINTS = 2400
@@ -771,6 +977,105 @@ with st.expander("🧑‍🔬 Ask the material expert", expanded=False):
                 if st.button("No, I'll set it myself", key="ae_skip",
                              use_container_width=True):
                     st.info("No problem — use the values listed above.")
+
+with st.expander("🔬 Test multiple combinations", expanded=False):
+    st.markdown(
+        "Pick several materials, exchangers, strains and phase durations "
+        "and I'll run every combination against one target, then rank them "
+        "so you can see which setups actually work and which are fastest "
+        "or most efficient. This keeps your current bundle geometry."
+    )
+    sw1, sw2 = st.columns(2)
+    with sw1:
+        sw_materials = st.multiselect(
+            "Materials to test", list(MATERIALS),
+            default=list(MATERIALS),
+            format_func=lambda k: MATERIALS[k].name, key="sw_materials")
+        sw_exchangers = st.multiselect(
+            "Exchangers to test", list(EXCHANGERS),
+            default=list(EXCHANGERS),
+            format_func=lambda k: EXCHANGERS[k].name, key="sw_exchangers")
+    with sw2:
+        sw_strain_fracs = st.multiselect(
+            "Strain, as a fraction of each material's plateau",
+            [0.5, 0.75, 1.0], default=[0.5, 0.75, 1.0],
+            format_func=lambda f: f"{f*100:.0f}%", key="sw_strain_fracs")
+        sw_phase_times = st.multiselect(
+            "Phase durations to test (s)", [0.5, 1.0, 2.0, 3.0],
+            default=[0.5, 1.0, 2.0], key="sw_phase_times")
+
+    sw3, sw4 = st.columns(2)
+    with sw3:
+        sw_target = st.number_input(
+            "Target for this comparison (°C)", -40.0, 40.0, 5.0, 1.0,
+            key="sw_target")
+    with sw4:
+        sw_ambient = st.number_input(
+            "Ambient for this comparison (°C)", 5.0, 45.0, 25.0, 1.0,
+            key="sw_ambient")
+
+    n_combos = (len(sw_materials) * len(sw_exchangers)
+               * len(sw_strain_fracs) * len(sw_phase_times))
+    st.caption(f"{n_combos} combinations will be simulated." if n_combos
+              else "Select at least one option in each list.")
+
+    if st.button("Run comparison", key="sw_go", disabled=(n_combos == 0)):
+        with st.spinner(f"Simulating {n_combos} combinations..."):
+            st.session_state["sw_results"] = sweep_combinations(
+                cfg, sw_materials, sw_exchangers, sw_strain_fracs,
+                sw_phase_times, sw_target, sw_ambient)
+        st.session_state["sw_ran"] = True
+
+    if st.session_state.get("sw_ran"):
+        results = st.session_state.get("sw_results", [])
+        n_ok = sum(1 for r in results if r["Reaches target"] == "Yes")
+        if n_ok == 0:
+            st.error(
+                f"None of the {len(results)} combinations tested can hold "
+                f"{sw_target:.1f} °C on this rig's current geometry. The "
+                "table below still shows how close each one gets — the "
+                "closest may point to what to change (bigger bundle, more "
+                "strain headroom, a different material)."
+            )
+        else:
+            st.success(f"{n_ok} of {len(results)} combinations can hold "
+                      f"{sw_target:.1f} °C. Best is listed first.")
+
+        table_rows = [{k: v for k, v in r.items() if k != "_cfg"}
+                     for r in results]
+        sw_frame = pd.DataFrame(table_rows)
+        st.dataframe(sw_frame, use_container_width=True, hide_index=True)
+
+        st.download_button(
+            "Download comparison (CSV)",
+            sw_frame.to_csv(index=False).encode(),
+            f"ecx_comparison_{datetime.now():%Y%m%d_%H%M}.csv",
+            "text/csv", key="sw_download")
+
+        if n_ok > 0:
+            labels = [
+                f"{r['Material']} · {r['Exchanger']} · {r['Strain (%)']}% "
+                f"· {r['Phase (s)']}s  —  "
+                f"{r['Time to target (min)']} min, COP {r['Steady COP']}"
+                for r in results if r["Reaches target"] == "Yes"
+            ]
+            pick = st.selectbox("Apply one of these to the rig:", labels,
+                                key="sw_pick")
+            if st.button("✅ Apply selected combination", key="sw_apply",
+                         type="primary"):
+                idx = labels.index(pick)
+                chosen = [r for r in results
+                         if r["Reaches target"] == "Yes"][idx]["_cfg"]
+                st.session_state["w_material"] = chosen.material_key
+                st.session_state["w_strain"] = chosen.strain_pct
+                st.session_state["w_phase_time"] = chosen.phase_time_s
+                st.session_state["w_hx"] = chosen.exchanger_key
+                st.session_state["w_ambient"] = chosen.ambient_c
+                st.session_state["w_target"] = chosen.target_c
+                st.session_state["sw_ran"] = False
+                st.session_state["_pending_full_reset"] = True
+                event("Combination applied from the comparison table.")
+                st.rerun()
 
 if env["reachable"]:
     headline = f"This configuration can hold {cfg.target_c:.1f} °C."
@@ -1026,6 +1331,7 @@ def build_report() -> str:
         ("Conductance UA", f"{cfg.ua_hx:.1f} W/K"),
         ("Thermal time constant", f"{tau:.2f} s"),
         ("Applied strain", f"{cfg.strain_pct:.2f} %"),
+        ("Regenerator effectiveness", f"{cfg.regen_effectiveness*100:.0f} %"),
         ("Phase duration", f"{cfg.phase_time_s:.2f} s"),
         ("Ambient", f"{cfg.ambient_c:.1f} °C"),
         ("Target", f"{cfg.target_c:.1f} °C"),
