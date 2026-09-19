@@ -120,6 +120,23 @@ class Config:
     insulation_ua: float = 0.35
     actuator_efficiency: float = 0.70
     regen_effectiveness: float = 0.0   # 0 = no regenerator (original model)
+    fixed_end: str = "right"           # "right" or "left" — the end held
+                                        # mechanically fixed; the opposite
+                                        # end is the one the displacement/
+                                        # strain is applied to. This is a
+                                        # user-defined labelling of the
+                                        # element's two ends: it documents
+                                        # the boundary condition on the rig
+                                        # and in the exported report, but
+                                        # does not itself alter the lumped
+                                        # thermal/mechanical model below,
+                                        # which treats the element as a
+                                        # single capacity with no spatial
+                                        # (left/right) resolution.
+
+    @property
+    def displacement_end(self) -> str:
+        return "left" if self.fixed_end == "right" else "right"
 
     @property
     def material(self) -> Material:
@@ -507,6 +524,7 @@ DEFAULTS = {
     "w_chamber_cap": 800.0,
     "w_insulation": 0.35,
     "w_regen": 0.0,
+    "w_fixed_end": "right",          # right = fixed, left = displacement
     "w_auto": True,
     "w_cycles_update": 4,
 }
@@ -613,6 +631,18 @@ with st.sidebar:
         "Applied strain (%)", strain_mn, strain_mx, step=0.1, key="w_strain",
         help=f"Transformation plateau ends near {mat.eps_tr * 100:.1f}%.")
     compression = st.toggle("Compressive loading", key="w_compression")
+
+    fixed_end = st.radio(
+        "Fixed end", ["left", "right"], horizontal=True, key="w_fixed_end",
+        help="Which end of the element is mechanically fixed. The other "
+             "end is where the displacement/strain is applied. This is "
+             "user-defined — set it to match your actual rig. Default is "
+             "right = fixed, left = displacement.")
+    displacement_end = "left" if fixed_end == "right" else "right"
+    st.caption(f"**{fixed_end.capitalize()}** end fixed · "
+              f"**{displacement_end.capitalize()}** end takes the "
+              f"applied displacement.")
+
     phase_time = st.slider("Phase duration (s)", 0.2, 5.0, step=0.1,
                            key="w_phase_time")
     eta_act = st.slider("Actuator efficiency", 0.3, 0.95, step=0.05,
@@ -811,10 +841,17 @@ cfg = Config(material_key=mat_key, exchanger_key=hx_key, form=form,
              phase_time_s=phase_time, flow_cfm=flow_cfm, ambient_c=ambient_c,
              target_c=target_c, chamber_capacity=chamber_cap,
              insulation_ua=insulation_ua, actuator_efficiency=eta_act,
-             regen_effectiveness=regen_eff)
+             regen_effectiveness=regen_eff, fixed_end=fixed_end)
 
 # --- run-time session state (separate from the widget/config state) ----
 MAX_POINTS = 2400
+
+# A person's saved snapshots are their own archive — not a rig setting
+# (untouched by "Restore factory defaults") and not run telemetry
+# (untouched by "Reset run data"). Only the explicit "Clear saved runs"
+# button below empties it.
+st.session_state.setdefault("saved_runs", [])
+st.session_state.setdefault("has_downloaded", False)
 
 
 def blank_log():
@@ -941,6 +978,26 @@ with st.expander("🧑‍🔬 Ask the material expert", expanded=False):
         "What matters more to you?",
         ["Reach it fast", "Best efficiency (COP)"],
         horizontal=True, key="ae_priority")
+
+    st.markdown("---")
+    st.markdown("**Boundary condition**")
+    ae_fixed_end = st.radio(
+        "Fixed end", ["left", "right"], horizontal=True,
+        key="ae_fixed_end",
+        help="Set which end is fixed, then apply it to the rig without "
+             "touching the rest of your sidebar settings.")
+    ae_disp_end = "left" if ae_fixed_end == "right" else "right"
+    st.caption(f"**{ae_fixed_end.capitalize()}** end fixed · "
+              f"**{ae_disp_end.capitalize()}** end takes the applied "
+              f"displacement.")
+    if st.button("✅ Apply boundary condition", key="ae_fixed_apply",
+                 use_container_width=True):
+        st.session_state["_pending_apply"] = {"w_fixed_end": ae_fixed_end}
+        st.session_state["_pending_full_reset"] = True
+        event(f"Boundary condition applied by the material expert: "
+              f"{ae_fixed_end} end fixed, {ae_disp_end} end displacement.")
+        st.rerun()
+    st.markdown("---")
 
     if st.button("Get recommendation", key="ae_go"):
         st.session_state["ae_results"] = search_recommendation(
@@ -1338,7 +1395,7 @@ frame = pd.DataFrame({
 })
 
 
-def build_report() -> str:
+def build_report(rows_extra=None) -> str:
     rows = [
         ("Material", mat.name),
         ("Element form", f"{cfg.n_elements} × {cfg.form}, {cfg.length_mm:.0f} mm"),
@@ -1349,6 +1406,9 @@ def build_report() -> str:
         ("Conductance UA", f"{cfg.ua_hx:.1f} W/K"),
         ("Thermal time constant", f"{tau:.2f} s"),
         ("Applied strain", f"{cfg.strain_pct:.2f} %"),
+        ("Boundary condition", f"{cfg.fixed_end.capitalize()} end fixed, "
+                               f"{cfg.displacement_end.capitalize()} end "
+                               f"displacement-driven"),
         ("Regenerator effectiveness", f"{cfg.regen_effectiveness*100:.0f} %"),
         ("Phase duration", f"{cfg.phase_time_s:.2f} s"),
         ("Ambient", f"{cfg.ambient_c:.1f} °C"),
@@ -1375,22 +1435,156 @@ def build_report() -> str:
             f"not measured.\n")
 
 
+# ---------------------------------------------------------------------
+# SAVE PANEL — a plain-language stage bar so it's obvious what to do
+# and where you stand: simulate it, save it here, then download it to
+# your own device (the only step that actually leaves a permanent copy
+# on your computer — everything before that lives only in this browser
+# tab and disappears if you close it).
+# ---------------------------------------------------------------------
+st.markdown("### 💾 Save your results")
+
+stage1_done = state.cycle > 0 or len(log["t"]) > 1
+stage2_done = len(st.session_state.saved_runs) > 0
+stage3_done = st.session_state.has_downloaded
+
+def _stage_class(done, active):
+    if done:
+        return "done"
+    if active:
+        return "active"
+    return "pending"
+
+STAGE_INFO = [
+    ("1", "Run a simulation", "Click Start sequencing or Run to steady "
+     "state above, on any target — reaching it isn't required."),
+    ("2", "Save it here", "Give this run a name and click Save. It "
+     "joins a list below, right on this screen."),
+    ("3", "Download it", "Download the file for any saved run. This is "
+     "the step that actually puts a copy on your device — the saved "
+     "list disappears if you close this browser tab."),
+]
+stage_states = [
+    stage1_done,
+    stage1_done and stage2_done,
+    stage1_done and stage2_done and stage3_done,
+]
+scols = st.columns(3)
+for i, (num, title, desc) in enumerate(STAGE_INFO):
+    active = (not stage_states[i]) and (i == 0 or stage_states[i - 1])
+    cls = _stage_class(stage_states[i], active)
+    with scols[i]:
+        st.markdown(
+            f'<div class="step {cls}"><div class="n">STAGE {num}</div>'
+            f'<div class="t">{"✓ " if stage_states[i] else ""}{title}</div>'
+            f'<div class="d">{desc}</div></div>',
+            unsafe_allow_html=True)
+
+st.write("")
+
+if not stage1_done:
+    st.info("Run at least one phase above, then come back here to save it.")
+else:
+    sv1, sv2 = st.columns([3, 1])
+    with sv1:
+        default_name = (
+            f"{mat.name.split('(')[0].strip()} → {cfg.target_c:.0f}°C "
+            f"({datetime.now():%H:%M})")
+        save_name = st.text_input("Name this run", value=default_name,
+                                  key="save_name_input")
+    with sv2:
+        st.write("")
+        st.write("")
+        do_save = st.button("💾 Save this run", type="primary",
+                            use_container_width=True)
+
+    if do_save:
+        snapshot = {
+            "name": save_name or default_name,
+            "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "material": mat.name,
+            "target_c": cfg.target_c,
+            "reached": state.target_reached,
+            "cycles": state.cycle,
+            "chamber_c": state.t_chamber,
+            "cop": avg_cop,
+            "csv": frame.to_csv(index=False),
+            "report": build_report(),
+        }
+        st.session_state.saved_runs.append(snapshot)
+        event(f"Run saved as \"{snapshot['name']}\".")
+        st.success(f"Saved as \"{snapshot['name']}\".")
+        st.rerun()
+
+    if st.session_state.saved_runs:
+        st.markdown(f"**Your saved runs ({len(st.session_state.saved_runs)})**")
+        for i, run in enumerate(reversed(st.session_state.saved_runs)):
+            badge = ("✅ Reached target" if run["reached"]
+                     else "⚠️ Did not reach target")
+            with st.expander(f"{run['name']}  —  {badge}", expanded=False):
+                rc1, rc2, rc3, rc4 = st.columns(4)
+                rc1.markdown(f'<div class="cap">Material</div>'
+                             f'<div class="figure" style="font-size:16px">'
+                             f'{run["material"]}</div>', unsafe_allow_html=True)
+                rc2.markdown(f'<div class="cap">Target</div>'
+                             f'<div class="figure" style="font-size:16px">'
+                             f'{run["target_c"]:.1f} °C</div>',
+                             unsafe_allow_html=True)
+                rc3.markdown(f'<div class="cap">Cycles</div>'
+                             f'<div class="figure" style="font-size:16px">'
+                             f'{run["cycles"]}</div>', unsafe_allow_html=True)
+                rc4.markdown(f'<div class="cap">COP</div>'
+                             f'<div class="figure" style="font-size:16px">'
+                             f'{run["cop"]:.2f}</div>', unsafe_allow_html=True)
+                st.caption(f"Saved {run['saved_at']}")
+
+                dc1, dc2 = st.columns(2)
+                orig_idx = len(st.session_state.saved_runs) - 1 - i
+                with dc1:
+                    if st.download_button(
+                            "Download data (CSV)", run["csv"].encode(),
+                            f"{run['name'].replace(' ', '_')}.csv",
+                            "text/csv", key=f"dl_csv_{orig_idx}",
+                            use_container_width=True):
+                        st.session_state.has_downloaded = True
+                with dc2:
+                    if st.download_button(
+                            "Download report (Markdown)",
+                            run["report"].encode(),
+                            f"{run['name'].replace(' ', '_')}.md",
+                            "text/markdown", key=f"dl_md_{orig_idx}",
+                            use_container_width=True):
+                        st.session_state.has_downloaded = True
+
+        if st.button("🗑 Clear all saved runs", key="clear_saved"):
+            st.session_state.saved_runs = []
+            event("Cleared all saved runs.")
+            st.rerun()
+
+st.write("")
+st.caption("Quick download without saving a named copy first:")
+
+
+
 e1, e2, e3 = st.columns(3)
 with e1:
-    st.download_button("Download time series (CSV)",
-                       frame.to_csv(index=False).encode(),
-                       f"ecx_run_{datetime.now():%Y%m%d_%H%M}.csv",
-                       "text/csv", use_container_width=True)
+    if st.download_button("Download time series (CSV)",
+                          frame.to_csv(index=False).encode(),
+                          f"ecx_run_{datetime.now():%Y%m%d_%H%M}.csv",
+                          "text/csv", use_container_width=True):
+        st.session_state.has_downloaded = True
 with e2:
-    st.download_button("Download test record (Markdown)",
-                       build_report().encode(),
-                       f"ecx_report_{datetime.now():%Y%m%d_%H%M}.md",
-                       "text/markdown", use_container_width=True)
+    if st.download_button("Download test record (Markdown)",
+                          build_report().encode(),
+                          f"ecx_report_{datetime.now():%Y%m%d_%H%M}.md",
+                          "text/markdown", use_container_width=True):
+        st.session_state.has_downloaded = True
 with e3:
     buf = io.StringIO(); frame.describe().to_csv(buf)
-    st.download_button("Download summary statistics (CSV)",
-                       buf.getvalue().encode(), "ecx_summary.csv",
-                       "text/csv", use_container_width=True)
+    if st.download_button("Download summary statistics (CSV)",
+                          buf.getvalue().encode(), "ecx_summary.csv",
+                          "text/csv", use_container_width=True):
+        st.session_state.has_downloaded = True
 
 with st.expander("Last 25 logged steps"):
     st.dataframe(frame.tail(25), use_container_width=True, hide_index=True)
