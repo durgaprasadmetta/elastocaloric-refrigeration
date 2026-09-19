@@ -302,6 +302,3 @@ def run_simulation(cfg: Config, duration_s: float = 300.0) -> pd.DataFrame:
             
         # Thermal derivative updates execution step routines
         dt_element = (-ua_active * (st_t_element - t_sink) + q_tr) / cfg.capacity
-        st_t_element += dt_element * dt
-        
-        if st_phase == 4:
