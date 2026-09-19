@@ -5,8 +5,6 @@ app.py
 ================================================================================
 An engineering-grade, real physics-based simulation, data-acquisition, and 
 SCADA/HMI research application developed for Mechanical Engineering projects.
-Monitors coupled thermomechanical, structural, air-side convective transport, 
-and closed environmental chamber thermal energy balances.
 
 Run:      streamlit run app.py
 Requires: streamlit numpy pandas matplotlib
@@ -16,7 +14,6 @@ from __future__ import annotations
 
 import io
 import math
-from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Tuple
 
@@ -26,210 +23,190 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-# Force non-interactive visualization backend context
+# Force non-interactive visualization backend context to prevent canvas locks
 matplotlib.use("Agg")
 
 # ==============================================================================
-# 1. PHYSICAL CONSTANTS & ENGINEERING CONVERSIONS
+# 1. PHYSICAL CONSTANTS & CONFIGURATIONS
 # ==============================================================================
-CFM_TO_M3S = 4.719474e-4  # Conversion from cubic feet per minute to m³/s
-AIR_RHO = 1.184           # Atmospheric density of dry air at 25°C (kg/m³)
-AIR_CP = 1005.0           # Specific heat capacity of air at constant pressure (J/kg·K)
-KELVIN = 273.15           # Absolute zero temperature offset definition
-NOMINAL_CFM = 50.0        # Reference baseline volumetric flow rate (CFM)
+CFM_TO_M3S = 4.719474e-4  
+AIR_RHO = 1.184           
+AIR_CP = 1005.0           
+KELVIN = 273.15           
+NOMINAL_CFM = 50.0        
 
-PHASE_MAP = {
-    1: "Phase 1: Mechanical Loading (Adiabatic Heating)",
-    2: "Phase 2: Heat Rejection (Convective Air Venting)",
-    3: "Phase 3: Mechanical Unloading (Adiabatic Cooling)",
-    4: "Phase 4: Heat Absorption (Product Chamber Pull-Down)"
-}
-
-# ==============================================================================
-# 2. DEFINITION DATA MODELS & DATABASES
-# ==============================================================================
-@dataclass(frozen=True)
-class MaterialProperties:
-    key: str
-    name: str
-    rho: float             # Density (kg/m³)
-    cp: float              # Specific heat capacity (J/kg·K)
-    ds_tr: float           # Transformation entropy change (J/kg·K)
-    eps_tr: float          # Maximum transformation strain value (dimensionless)
-    sigma_ref_mpa: float   # Reference transformation plateau stress (MPa)
-    t_ref_c: float         # Reference engineering temperature for stress model (°C)
-    cc_slope: float        # Clausius-Clapeyron thermomechanical slope (MPa/K)
-    sigma_hyst_mpa: float  # Mechanical loading/unloading hysteresis envelope (MPa)
-    sigma_limit_mpa: float # Structural working mechanical stress yield limit (MPa)
-    af_c: float            # Austenite finish temperature threshold (°C)
-    fatigue_cycles: int    # Indicative mechanical operational life metric (cycles)
-
-    def calculate_adiabatic_swing(self, current_temp_c: float, applied_strain: float) -> float:
-        """Computes structural lattice temperature step using entropy balance."""
-        transformation_fraction = min(1.0, max(0.0, applied_strain / self.eps_tr))
-        absolute_temp_k = current_temp_c + KELVIN
-        return absolute_temp_k * self.ds_tr * transformation_fraction / self.cp
-
-    def calculate_plateau_stress(self, current_temp_c: float) -> float:
-        """Determines thermodynamic forward transformation stress plateau baseline."""
-        return self.sigma_ref_mpa + self.cc_slope * (current_temp_c - self.t_ref_c)
-
-
-MATERIAL_DATABASE: Dict[str, MaterialProperties] = {
-    "niti": MaterialProperties(
-        "niti", "NiTi (Nitinol, 50.8 at.% Ni Alloy)",
-        6450.0, 470.0, 40.0, 0.055, 420.0, 25.0, 6.5, 160.0, 800.0, -5.0, 100000
-    ),
-    "cualni": MaterialProperties(
-        "cualni", "Cu-Al-Ni Shape Memory Single Crystal",
-        7100.0, 400.0, 22.0, 0.045, 180.0, 25.0, 2.2, 45.0, 350.0, 5.0, 20000
-    ),
-    "femnsi": MaterialProperties(
-        "femnsi", "Fe-Mn-Si Ferrous Shape Memory Alloy",
-        7200.0, 520.0, 12.0, 0.030, 280.0, 25.0, 1.6, 140.0, 600.0, 20.0, 500000
-    ),
-    "rubber": MaterialProperties(
-        "rubber", "Natural Rubber (Elastocaloric Polymer Matrix)",
-        950.0, 1900.0, 28.0, 3.000, 3.0, 25.0, 0.02, 1.2, 18.0, -60.0, 1000000
-    ),
-}
-
-@dataclass(frozen=True)
-class ExchangerConfiguration:
-    key: str
-    name: str
-    convective_h_ref: float  # Base heat transfer coefficient (W/m²·K)
-    parasitic_w: float       # Auxiliary mechanical/electrical fan power footprint (W)
-
-
-EXCHANGER_DATABASE: Dict[str, ExchangerConfiguration] = {
-    "bare_air": ExchangerConfiguration("bare_air", "Bare Tube matrix, Forced Convection Air", 90.0, 8.0),
-    "finned_air": ExchangerConfiguration("finned_air", "Finned Surface Grid, Forced Convection Air", 620.0, 14.0),
-}
+@st.cache_data
+def get_material_database():
+    return {
+        "NiTi (Nitinol, 50.8 at.% Ni)": {"rho": 6450.0, "cp": 470.0, "ds_tr": 40.0, "eps_tr": 0.055, "sigma_limit": 800.0, "cc_slope": 6.5, "sigma_ref": 420.0, "sigma_hyst": 160.0},
+        "Cu-Al-Ni single crystal": {"rho": 7100.0, "cp": 400.0, "ds_tr": 22.0, "eps_tr": 0.045, "sigma_limit": 350.0, "cc_slope": 2.2, "sigma_ref": 180.0, "sigma_hyst": 45.0},
+        "Fe-Mn-Si alloy": {"rho": 7200.0, "cp": 520.0, "ds_tr": 12.0, "eps_tr": 0.030, "sigma_limit": 600.0, "cc_slope": 1.6, "sigma_ref": 280.0, "sigma_hyst": 140.0},
+        "Natural rubber": {"rho": 950.0, "cp": 1900.0, "ds_tr": 28.0, "eps_tr": 3.000, "sigma_limit": 18.0, "cc_slope": 0.02, "sigma_ref": 3.0, "sigma_hyst": 1.2}
+    }
 
 # ==============================================================================
-# 3. ADVANCED FLUID LOOP THERMOMECHANICAL SYSTEM LAYOUT CONFIGURATOR
+# 2. RUNNABLE SOLVER INTERFACE
 # ==============================================================================
-@dataclass(frozen=True)
-class SystemConfiguration:
-    material_key: str = "niti"
-    exchanger_key: str = "finned_air"
-    element_form: str = "tube"
-    n_elements: int = 5
-    length_mm: float = 150.0
-    od_mm: float = 12.0
-    id_mm: float = 10.0
-    applied_strain_pct: float = 5.0
-    mode_compression: bool = False
-    phase_time_s: float = 0.8
-    flow_rate_cfm: float = 50.0
-    ambient_temp_c: float = 25.0
-    target_temp_c: float = 10.0
-    chamber_fluid_mass_kg: float = 2.0  # Thermal equivalent water-mass mass load
-    insulation_ua_w_k: float = 0.35     # Enclosure parasitic leak coefficient
-    actuator_efficiency: float = 0.70   # Mechanical drive powertrain efficiency
-    regen_effectiveness: float = 0.0    # Solid-state regeneration recovery factor
-    fixed_boundary_end: str = "right"   # Rig boundary kinematics labeling definition
-
-    @property
-    def operational_material(self) -> MaterialProperties:
-        return MATERIAL_DATABASE[self.material_key]
-
-    @property
-    def structural_exchanger(self) -> ExchangerConfiguration:
-        return EXCHANGER_DATABASE[self.exchanger_key]
-
-    @property
-    def applied_strain(self) -> float:
-        return self.applied_strain_pct / 100.0
-
-    @property
-    def elements_cross_section_area_m2(self) -> float:
-        outer_radius_m = (self.od_mm * 1e-3) / 2.0
-        inner_radius_m = (self.id_mm * 1e-3) / 2.0
-        if self.element_form == "wire":
-            single_area = math.pi * (outer_radius_m ** 2)
-        else:
-            single_area = math.pi * (outer_radius_m ** 2 - inner_radius_m ** 2)
-        return single_area * self.n_elements
-
-    @property
-    def structural_volume_m3(self) -> float:
-        return self.elements_cross_section_area_m2 * (self.length_mm * 1e-3)
-
-    @property
-    def structural_mass_kg(self) -> float:
-        return self.structural_volume_m3 * self.operational_material.rho
-
-    @property
-    def thermal_capacitance_j_k(self) -> float:
-        return self.structural_mass_kg * self.operational_material.cp
-
-    @property
-    def wetted_surface_area_m2(self) -> float:
-        outer_dia_m = self.od_mm * 1e-3
-        inner_dia_m = self.id_mm * 1e-3
-        length_m = self.length_mm * 1e-3
-        if self.element_form == "wire":
-            perimeter = math.pi * outer_dia_m
-        else:
-            perimeter = math.pi * (outer_dia_m + inner_dia_m)
-        return perimeter * length_m * self.n_elements
-
-    @property
-    def convective_ua_hx_w_k(self) -> float:
-        ex = self.structural_exchanger
-        reynolds_scaling = (max(self.flow_rate_cfm, 1.0) / NOMINAL_CFM) ** 0.6
-        local_h_coefficient = ex.convective_h_ref * reynolds_scaling
-        total_ha = local_h_coefficient * self.wetted_surface_area_m2
+def execute_scada_simulation(
+    rho, cp, ds_tr, eps_tr, sigma_limit, cc_slope, sigma_ref, sigma_hyst,
+    form, n_elements, length_mm, od_mm, id_mm, strain_pct, phase_time_s,
+    ambient_c, target_c, flow_cfm, mode_compression
+) -> pd.DataFrame:
+    
+    dt = 0.4
+    duration_s = 120.0
+    steps = int(duration_s / dt)
+    cycle_period = 4.0 * phase_time_s
+    
+    # Calculate geometric parameters
+    or_m = (od_mm * 1e-3) / 2.0
+    ir_m = (id_mm * 1e-3) / 2.0
+    a_single = math.pi * (or_m**2) if form == "wire" else math.pi * (or_m**2 - ir_m**2)
+    a_total = a_single * n_elements
+    vol = a_total * (length_mm * 1e-3)
+    mass = vol * rho
+    cap = mass * cp
+    wetted_area = (math.pi * od_mm * 1e-3 if form == "wire" else math.pi * (od_mm + id_mm) * 1e-3) * length_mm * 1e-3 * n_elements
+    
+    # Precompute thermal conductances
+    ha = 620.0 * ((max(flow_cfm, 1.0) / NOMINAL_CFM) ** 0.6) * wetted_area
+    mdot_cp = flow_cfm * CFM_TO_M3S * AIR_RHO * AIR_CP
+    ua_hx = (1.0 - math.exp(-ha / mdot_cp)) * mdot_cp if mdot_cp > 0 else 0.0
+    ua_idle = 9.0 * wetted_area
+    
+    # State flags
+    time_s, t_element, t_chamber = 0.0, ambient_c, ambient_c
+    accumulated_cooling_j, accumulated_work_j = 0.0, 0.0
+    inst_cooling_w, inst_cop = 0.0, 0.0
+    
+    records = []
+    
+    for step in range(steps + 1):
+        time_within_cycle = time_s % cycle_period
+        current_cycle = int(time_s // cycle_period)
         
-        mass_flow_rate_air = self.flow_rate_cfm * CFM_TO_M3S * AIR_RHO
-        heat_capacity_flow_air = mass_flow_rate_air * AIR_CP
-        if heat_capacity_flow_air <= 0:
-            return 0.0
-        # NTU-Effectiveness fluid loop thermal boundary implementation
-        effectiveness = 1.0 - math.exp(-total_ha / heat_capacity_flow_air)
-        return effectiveness * heat_capacity_flow_air
-
-    @property
-    def natural_convection_ua_w_k(self) -> float:
-        """Parasitic heat transfer baseline during closed/stopped valve steps."""
-        return 9.0 * self.wetted_surface_area_m2
-
-    @property
-    def cycle_period_s(self) -> float:
-        return 4.0 * self.phase_time_s
-
-    @property
-    def intrinsic_hysteresis_loss_j(self) -> float:
-        clamped_strain = min(self.applied_strain, self.operational_material.eps_tr)
-        stress_hysteresis_pa = self.operational_material.sigma_hyst_mpa * 1e6
-        return stress_hysteresis_pa * clamped_strain * self.structural_volume_m3
-
+        if time_within_cycle < phase_time_s:
+            phase = 1
+            strain = (time_within_cycle / phase_time_s) * (strain_pct / 100.0)
+            stress = (sigma_ref + cc_slope * (t_element - 25.0)) + (sigma_hyst / 2.0)
+        elif time_within_cycle < 2.0 * phase_time_s:
+            phase = 2
+            strain = strain_pct / 100.0
+            stress = (sigma_ref + cc_slope * (t_element - 25.0)) + (sigma_hyst / 2.0)
+        elif time_within_cycle < 3.0 * phase_time_s:
+            phase = 3
+            fraction = (time_within_cycle - 2.0 * phase_time_s) / phase_time_s
+            strain = (1.0 - fraction) * (strain_pct / 100.0)
+            stress = max(0.0, (sigma_ref + cc_slope * (t_element - 25.0)) - (sigma_hyst / 2.0))
+        else:
+            phase = 4
+            strain = 0.0
+            stress = 0.0
+            
+        if mode_compression:
+            stress = -abs(stress)
+            
+        force_kn = abs(stress * 1e6 * a_total) / 1000.0
+        disp_mm = strain * length_mm
+        
+        # Latent heat spikes
+        q_latent = 0.0
+        if phase == 1 and time_within_cycle < dt:
+            q_latent = (t_chamber + KELVIN) * ds_tr * min(1.0, strain / eps_tr) * cap / dt
+        elif phase == 3 and abs(time_within_cycle - 2.0 * phase_time_s) < dt:
+            q_latent = -(t_chamber + KELVIN) * ds_tr * min(1.0, (strain_pct / 100.0) / eps_tr) * cap / dt
+            
+        # Convection path routing
+        ua = ua_hx if phase in (2, 4) else ua_idle
+        t_in = t_chamber if phase == 4 else ambient_c
+        
+        # Thermal derivative stepping
+        t_element += ((-ua * (t_element - t_in) + q_latent) / max(1.0, cap)) * dt
+        t_out = t_element + (t_in - t_element) * math.exp(-ua / max(1.0, mdot_cp)) if ua > 0 else t_element
+        
+        # Chamber energy balance
+        q_leak = 0.35 * (ambient_c - t_chamber) * dt
+        if phase == 4:
+            q_cool = ua * (t_element - t_chamber) * dt
+            if q_cool < 0:
+                accumulated_cooling_j += abs(q_cool)
+            t_chamber += ((q_cool + q_leak) / (2.0 * 4184.0))
+        else:
+            t_chamber += (q_leak / (2.0 * 4184.0))
+            
+        # Cycle reset configurations
+        if abs(time_within_cycle - (cycle_period - dt)) < 1e-3:
+            inst_cooling_w = accumulated_cooling_j / cycle_period
+            work_input = max(10.0, (sigma_hyst * 1e6 * min(strain_pct/100.0, eps_tr) * vol) / 0.70 + (14.0 * cycle_period))
+            inst_cop = accumulated_cooling_j / work_input
+            accumulated_cooling_j = 0.0
+            
+        records.append({
+            "time_s": time_s, "cycle": current_cycle, "phase": phase, "chamber_c": t_chamber,
+            "element_c": t_element, "air_inlet_c": t_in, "air_outlet_c": t_out, "strain_pct": strain * 100.0,
+            "stress_mpa": stress, "force_kn": force_kn, "displacement_mm": disp_mm, "cooling_w": inst_cooling_w,
+            "cop": inst_cop, "safety_status": 1.0 if abs(stress) <= sigma_limit else 0.0
+        })
+        time_s += dt
+        
+    return pd.DataFrame(records)
 
 # ==============================================================================
-# 4. SOLVER COMPONENT: TRANSIENT PHYSICS LOOP
+# 3. INTERFACE DEPLOYMENT BLOCK
 # ==============================================================================
-def execute_scada_physics_simulation(cfg: SystemConfiguration, run_duration_s: float = 240.0) -> pd.DataFrame:
-    """
-    Executes a high-fidelity numerical transient finite-difference time integration
-    of the thermodynamic, structural mechanical, convective air-transport, and 
-    enclosure thermal load network models. Output parameters are grounded explicitly.
-    """
-    dt = 0.4  # Step size (seconds) matching system data logging framework
-    steps = int(run_duration_s / dt)
+def main():
+    st.set_page_config(page_title="NiTi SCADA HMI", layout="wide")
     
-    # Establish initialization baselines matching standard thermodynamic starting points
-    time_s = 0.0
-    current_cycle = 0
-    current_phase = 1
+    st.title("🎛️ NiTi Elastocaloric Refrigeration SCADA Project")
+    st.markdown("---")
     
-    t_element = cfg.ambient_temp_c
-    t_chamber = cfg.ambient_temp_c
-    t_fluid_in = cfg.ambient_temp_c
-    t_fluid_out = cfg.ambient_temp_c
+    # Initialize reactive storage dictionaries safely
+    db = get_material_database()
     
-    strain_state = 0.0
-    stress_state_mpa = 0.0
+    st.sidebar.header("🛠️ Test Rig Controls")
+    op_mode = st.sidebar.radio("MONITORING MODE:", ["SIMULATION MODE", "EXPERIMENT MODE"])
     
-    accumulated_cooling_joules = 0.0
+    mat_selection = st.sidebar.selectbox("Active Alloy Matrix:", list(db.keys()))
+    mat_props = db[mat_selection]
+    
+    with st.sidebar.expander("📝 Modify Material Constants"):
+        rho = st.number_input("Density (kg/m³):", value=mat_props["rho"])
+        cp = st.number_input("Specific Heat (J/kg·K):", value=mat_props["cp"])
+        ds_tr = st.number_input("Entropy ΔS (J/kg·K):", value=mat_props["ds_tr"])
+        eps_tr = st.number_input("Max Trans Strain:", value=mat_props["eps_tr"], format="%.3f")
+        sigma_limit = st.number_input("Stress Yield Limit (MPa):", value=mat_props["sigma_limit"])
+        cc_slope = st.number_input("CC Slope (MPa/K):", value=mat_props["cc_slope"])
+        sigma_ref = st.number_input("Plateau Base Stress (MPa):", value=mat_props["sigma_ref"])
+        sigma_hyst = st.number_input("Hysteresis (MPa):", value=mat_props["sigma_hyst"])
+
+    st.sidebar.subheader("📐 Element Geometry")
+    form = st.sidebar.radio("Profile Geometry Factor:", ["tube", "wire"])
+    n_elements = st.sidebar.number_input("Element Count:", min_value=1, value=5)
+    length_mm = st.sidebar.number_input("Length (mm):", value=150.0)
+    od_mm = st.sidebar.number_input("Outer Dia (mm):", value=12.0)
+    id_mm = st.sidebar.number_input("Inner Dia (mm):", value=10.0)
+    
+    st.sidebar.subheader("🔄 Mechanical Controls")
+    strain_pct = st.sidebar.slider("Applied Stroke (Strain %):", 0.5, 10.0, 5.5, 0.1)
+    phase_time_s = st.sidebar.slider("Phase Steps Interval (s):", 0.1, 5.0, 0.8, 0.1)
+    mode_compression = st.sidebar.checkbox("Compression Profile Vector")
+    
+    st.sidebar.subheader("🎯 Chamber Boundaries")
+    ambient_c = st.sidebar.number_input("Ambient Environment Base (°C):", value=25.0)
+    target_c = st.sidebar.number_input("Chamber Target Level (°C):", value=10.0)
+    flow_cfm = st.sidebar.slider("Volumetric Air Flow (CFM):", 10.0, 200.0, 50.0, 5.0)
+
+    # Process solver triggers safely behind a responsive spinner
+    with st.spinner("Processing transient non-linear engineering matrix equations..."):
+        df = execute_scada_simulation(
+            rho, cp, ds_tr, eps_tr, sigma_limit, cc_slope, sigma_ref, sigma_hyst,
+            form, n_elements, length_mm, od_mm, id_mm, strain_pct, phase_time_s,
+            ambient_c, target_c, flow_cfm, mode_compression
+        )
+
+    # Telemetry Instrumentation Readouts Rendering Section
+    st.markdown("### 📊 Real-Time SCADA Dashboard Metrics")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Chamber Core Temp", f"{df['chamber_c'].iloc[-1]:.2f} °C")
+    m2.metric("NiTi Element Node", f"{df['element_c'].iloc[-1]:.2f} °C")
+    m3.metric("Mechanical Work Net", f"{df['force_kn'].iloc[-1]:.2f} kN")
