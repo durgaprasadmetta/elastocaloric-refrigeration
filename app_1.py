@@ -233,5 +233,3 @@ def execute_scada_physics_simulation(cfg: SystemConfiguration, run_duration_s: f
     stress_state_mpa = 0.0
     
     accumulated_cooling_joules = 0.0
-    accumulated_work_joules = 0.0
-    
