@@ -17,16 +17,65 @@ Two lumped capacities integrated in time:
 Adiabatic elastocaloric swing:   dT_ad = T ds_tr xi / cp
 Transformation stress:           sigma(T) = sigma_ref + C_cc (T - T_ref)
 Exchanger:                       NTU-effectiveness on the gas side
+
+=================================================================
+ARCHITECTURE NOTES (read this before touching the app)
+=================================================================
+This build adds three things on top of the original single-user demo,
+without changing the physics in PART 1:
+
+  1. MULTI-USER DATA ISOLATION
+     Streamlit already gives every browser tab/session its own private
+     `st.session_state` — two people on the same URL never share Python
+     objects at runtime. What the *original* app was missing was
+     PERSISTENCE: session_state disappears on refresh/close, and there
+     was nowhere per-user to keep it. This build adds a small SQLite
+     database (PART 1.5) with every table keyed by `user_id`, and every
+     read/write goes through that key. That's what makes "own saved
+     configuration / own files / own AI context" survive a refresh or a
+     reopened tab, and what makes it correct with N concurrent users.
+
+     IDENTITY: this demo authenticates with a simple, self-chosen user
+     ID (a name/handle) carried in the URL's `?u=` query parameter —
+     there is no password. That is intentionally lightweight so the
+     app keeps working as a single shared URL with zero extra
+     infrastructure. It is NOT meant to be a production auth system:
+     anyone who knows another person's `u` value could open their
+     session. If you deploy this somewhere that matters, put a real
+     identity provider in front of it (e.g. `st.experimental_user`
+     behind Streamlit Community Cloud SSO, or an external auth proxy)
+     and pass the verified identity into `get_or_create_user_id()`
+     instead of trusting the query string.
+
+  2. SETTINGS / DASHBOARD SEPARATION + DRAFT VS ACTIVE
+     All the previously-editable sidebar controls now live on the
+     "User Defined Settings" tab and write into `st.session_state`
+     keys prefixed `d_...` (draft only). Nothing there is live. The
+     dashboard, calculations, graphs and simulation all read from
+     `st.session_state["active"]`, a plain dict, which only changes
+     when "Apply changes" validates the draft and commits it — at
+     which point it is also written to SQLite for that user.
+
+  3. THEME
+     A single `theme(...)` dict of semantic colors feeds one CSS
+     block (`inject_css`) that is intentionally broad — it targets
+     Streamlit's actual DOM (data-testid selectors), not just this
+     app's own custom divs, so widgets, alerts, tables, tabs, popovers
+     and dynamically-created components all follow the same theme.
 =================================================================
 """
 
 from __future__ import annotations
 
 import io
+import json
 import math
+import sqlite3
+import threading
+import uuid
 from dataclasses import dataclass, fields, replace
 from datetime import datetime
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -37,7 +86,7 @@ import streamlit as st
 matplotlib.use("Agg")
 
 # =================================================================
-# PART 1 — PHYSICS CORE
+# PART 1 — PHYSICS CORE  (unchanged from the original app)
 # =================================================================
 
 CFM_TO_M3S = 4.719474e-4
@@ -427,11 +476,322 @@ def search_recommendation(base_cfg, material_key, target_temp, ambient,
 
 
 # =================================================================
-# PART 2 — INTERFACE
+# PART 1.5 — PERSISTENCE LAYER  (SQLite, every table keyed by user_id)
+# =================================================================
+# This is the piece the original single-user demo did not have. It is
+# a plain file-backed SQLite database so the app keeps working as one
+# shared URL with no external service required; swap `_conn()` for a
+# real managed database (Postgres, etc.) if you need true multi-writer
+# concurrency at scale — the schema and call sites below don't change.
+
+DB_PATH = "ecx_scada.db"
+_DB_LOCK = threading.Lock()
+
+CONFIG_FIELDS: List[str] = [f.name for f in fields(Config)]
+
+
+def config_to_dict(cfg: Config) -> dict:
+    return {k: getattr(cfg, k) for k in CONFIG_FIELDS}
+
+
+def dict_to_config(d: dict) -> Config:
+    return Config(**{k: d[k] for k in CONFIG_FIELDS if k in d})
+
+
+def _conn() -> sqlite3.Connection:
+    c = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=15)
+    c.execute("PRAGMA journal_mode=WAL")
+    return c
+
+
+def init_db() -> None:
+    with _DB_LOCK, _conn() as c:
+        c.execute("""CREATE TABLE IF NOT EXISTS users(
+            user_id TEXT PRIMARY KEY, created_at TEXT)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS configs(
+            user_id TEXT PRIMARY KEY, cfg_json TEXT, updated_at TEXT)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS prefs(
+            user_id TEXT PRIMARY KEY, dark INTEGER)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS saved_runs(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT,
+            name TEXT, payload_json TEXT, saved_at TEXT)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS user_files(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT,
+            filename TEXT, mime TEXT, content BLOB, note TEXT,
+            uploaded_at TEXT)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS ai_context(
+            user_id TEXT PRIMARY KEY, ctx_json TEXT, updated_at TEXT)""")
+
+
+def ensure_user(user_id: str) -> None:
+    with _DB_LOCK, _conn() as c:
+        c.execute("INSERT OR IGNORE INTO users(user_id, created_at) VALUES (?,?)",
+                 (user_id, datetime.now().isoformat()))
+
+
+def load_active_config(user_id: str) -> Optional[dict]:
+    with _DB_LOCK, _conn() as c:
+        row = c.execute("SELECT cfg_json FROM configs WHERE user_id=?",
+                        (user_id,)).fetchone()
+    return json.loads(row[0]) if row else None
+
+
+def save_active_config(user_id: str, cfg_dict: dict) -> None:
+    with _DB_LOCK, _conn() as c:
+        c.execute("""INSERT INTO configs(user_id, cfg_json, updated_at)
+                     VALUES(?,?,?)
+                     ON CONFLICT(user_id) DO UPDATE SET
+                     cfg_json=excluded.cfg_json, updated_at=excluded.updated_at""",
+                 (user_id, json.dumps(cfg_dict), datetime.now().isoformat()))
+
+
+def delete_active_config(user_id: str) -> None:
+    with _DB_LOCK, _conn() as c:
+        c.execute("DELETE FROM configs WHERE user_id=?", (user_id,))
+
+
+def load_pref_dark(user_id: str, default: bool = True) -> bool:
+    with _DB_LOCK, _conn() as c:
+        row = c.execute("SELECT dark FROM prefs WHERE user_id=?",
+                        (user_id,)).fetchone()
+    return bool(row[0]) if row else default
+
+
+def save_pref_dark(user_id: str, dark: bool) -> None:
+    with _DB_LOCK, _conn() as c:
+        c.execute("""INSERT INTO prefs(user_id, dark) VALUES(?,?)
+                     ON CONFLICT(user_id) DO UPDATE SET dark=excluded.dark""",
+                 (user_id, int(dark)))
+
+
+def list_saved_runs(user_id: str) -> List[dict]:
+    with _DB_LOCK, _conn() as c:
+        rows = c.execute("""SELECT id, name, payload_json, saved_at
+                            FROM saved_runs WHERE user_id=?
+                            ORDER BY id DESC""", (user_id,)).fetchall()
+    out = []
+    for rid, name, payload, saved_at in rows:
+        d = json.loads(payload)
+        d.update({"id": rid, "name": name, "saved_at": saved_at})
+        out.append(d)
+    return out
+
+
+def add_saved_run(user_id: str, name: str, payload: dict) -> None:
+    with _DB_LOCK, _conn() as c:
+        c.execute("""INSERT INTO saved_runs(user_id, name, payload_json, saved_at)
+                     VALUES (?,?,?,?)""",
+                 (user_id, name, json.dumps(payload), datetime.now().isoformat()))
+
+
+def delete_saved_run(user_id: str, run_id: int) -> None:
+    with _DB_LOCK, _conn() as c:
+        c.execute("DELETE FROM saved_runs WHERE user_id=? AND id=?",
+                 (user_id, run_id))
+
+
+def clear_saved_runs(user_id: str) -> None:
+    with _DB_LOCK, _conn() as c:
+        c.execute("DELETE FROM saved_runs WHERE user_id=?", (user_id,))
+
+
+def list_user_files(user_id: str) -> List[Tuple]:
+    with _DB_LOCK, _conn() as c:
+        return c.execute("""SELECT id, filename, mime, note, uploaded_at,
+                            length(content) FROM user_files
+                            WHERE user_id=? ORDER BY id DESC""",
+                         (user_id,)).fetchall()
+
+
+def add_user_file(user_id: str, filename: str, mime: str, content: bytes,
+                  note: str = "") -> None:
+    with _DB_LOCK, _conn() as c:
+        c.execute("""INSERT INTO user_files(user_id, filename, mime, content,
+                     note, uploaded_at) VALUES (?,?,?,?,?,?)""",
+                 (user_id, filename, mime, content, note,
+                  datetime.now().isoformat()))
+
+
+def get_user_file(user_id: str, file_id: int) -> Optional[Tuple]:
+    with _DB_LOCK, _conn() as c:
+        return c.execute("""SELECT filename, mime, content FROM user_files
+                            WHERE user_id=? AND id=?""",
+                         (user_id, file_id)).fetchone()
+
+
+def delete_user_file(user_id: str, file_id: int) -> None:
+    with _DB_LOCK, _conn() as c:
+        c.execute("DELETE FROM user_files WHERE user_id=? AND id=?",
+                 (user_id, file_id))
+
+
+def load_ai_context(user_id: str) -> dict:
+    with _DB_LOCK, _conn() as c:
+        row = c.execute("SELECT ctx_json FROM ai_context WHERE user_id=?",
+                        (user_id,)).fetchone()
+    return json.loads(row[0]) if row else {}
+
+
+def save_ai_context(user_id: str, ctx: dict) -> None:
+    with _DB_LOCK, _conn() as c:
+        c.execute("""INSERT INTO ai_context(user_id, ctx_json, updated_at)
+                     VALUES(?,?,?)
+                     ON CONFLICT(user_id) DO UPDATE SET
+                     ctx_json=excluded.ctx_json, updated_at=excluded.updated_at""",
+                 (user_id, json.dumps(ctx), datetime.now().isoformat()))
+
+
+init_db()
+
+# ---------------------------------------------------------------
+# Factory / default ACTIVE configuration. This is the full superset of
+# what "User Defined Settings" edits: every Config() field, plus a
+# handful of UI-only extras (boundary-condition mode, auto-sequencing,
+# free-text research notes) that aren't physics parameters but still
+# belong to "the current user's configuration".
+# ---------------------------------------------------------------
+_default_material = MATERIALS["niti"]
+_default_strain_pct = round(_default_material.eps_tr * 100 * 0.9, 1)
+_default_length_mm = 150.0
+_default_cfg = Config(strain_pct=_default_strain_pct, length_mm=_default_length_mm)
+
+ACTIVE_DEFAULTS: dict = {
+    **config_to_dict(_default_cfg),
+    "bc_mode": "Fixed + Displacement",
+    "bc_fixed_end": "Left",
+    "bc_direction": "Tension (elongation)",
+    "bc_disp_mm": round(_default_length_mm * _default_strain_pct / 100, 2),
+    "auto_mode": True,
+    "cycles_per_update": 4,
+    "experimental_notes": "",
+    "material_notes": "",
+}
+
+
+def full_active_dict(user_id: str) -> dict:
+    """Loads this user's persisted active config, filling in any keys
+    that don't exist yet (new user, or app upgraded with new fields)."""
+    stored = load_active_config(user_id) or {}
+    merged = {**ACTIVE_DEFAULTS, **stored}
+    return merged
+
+
+def validate_settings(d: dict) -> List[str]:
+    """Rejects physically-inconsistent settings before they can become
+    active. Returns a list of human-readable errors; empty = valid."""
+    errs = []
+    mat = MATERIALS[d["material_key"]]
+    if d["form"] == "tube" and d["id_mm"] >= d["od_mm"]:
+        errs.append("Bore diameter must be smaller than outer diameter for a tube.")
+    if d["form"] != "custom" and d["od_mm"] <= 0:
+        errs.append("Outer diameter must be positive.")
+    if d["form"] == "custom" and d.get("custom_area_mm2", 0) <= 0:
+        errs.append("Custom cross-section area must be positive.")
+    if d["strain_pct"] <= 0:
+        errs.append("Applied strain must be positive.")
+    if d["strain_pct"] > mat.eps_tr * 100 * 1.5:
+        errs.append(f"Applied strain ({d['strain_pct']:.1f}%) is unreasonably "
+                    f"far past {mat.name.split('(')[0].strip()}'s "
+                    f"{mat.eps_tr*100:.1f}% transformation plateau.")
+    if d["phase_time_s"] <= 0:
+        errs.append("Phase duration must be positive.")
+    if d["n_elements"] < 1:
+        errs.append("Bundle must have at least one element.")
+    if d["length_mm"] <= 0:
+        errs.append("Active length must be positive.")
+    if d["chamber_capacity"] <= 0:
+        errs.append("Chamber heat capacity must be positive.")
+    if not (-273.0 < d["target_c"] < d["ambient_c"] + 60):
+        errs.append("Target temperature is out of a physically sane range.")
+    if d["bc_mode"] == "User Defined":
+        disp_max = max(0.1, d["length_mm"] * 0.10)
+        if not (0 < d.get("bc_disp_mm", 0) <= disp_max):
+            errs.append(f"Displacement magnitude must be between 0 and "
+                        f"{disp_max:.2f} mm (10% of the active length).")
+    return errs
+
+
+def settings_to_config(d: dict) -> Config:
+    """Resolves boundary-condition mode into the strain/compression the
+    physics engine actually uses, then builds a Config."""
+    if d["bc_mode"] == "User Defined":
+        eff_strain = round(d["bc_disp_mm"] / d["length_mm"] * 100, 3) \
+            if d["length_mm"] > 0 else d["strain_pct"]
+        eff_compression = (d["bc_direction"] == "Compression (contraction)")
+    else:
+        eff_strain = d["strain_pct"]
+        eff_compression = d["mode_compression"]
+    return Config(**{
+        **{k: d[k] for k in CONFIG_FIELDS if k not in
+           ("strain_pct", "mode_compression")},
+        "strain_pct": eff_strain,
+        "mode_compression": eff_compression,
+    })
+
+
+# =================================================================
+# PART 2 — USER IDENTITY
+# =================================================================
+
+def _slugify(raw: str) -> str:
+    s = "".join(ch.lower() if ch.isalnum() else "-" for ch in raw.strip())
+    s = "-".join(filter(None, s.split("-")))
+    return s[:60]
+
+
+def get_query_user() -> Optional[str]:
+    try:
+        val = st.query_params.get("u")
+    except Exception:
+        qp = st.experimental_get_query_params()
+        val = qp.get("u", [None])[0]
+    return val or None
+
+
+def set_query_user(user_id: str) -> None:
+    try:
+        st.query_params["u"] = user_id
+    except Exception:
+        st.experimental_set_query_params(u=user_id)
+
+
+def clear_query_user() -> None:
+    try:
+        if "u" in st.query_params:
+            del st.query_params["u"]
+    except Exception:
+        st.experimental_set_query_params()
+
+
+# =================================================================
+# PART 3 — INTERFACE
 # =================================================================
 
 st.set_page_config(page_title="Elastocaloric rig control", page_icon="◆",
-                   layout="wide", initial_sidebar_state="expanded")
+                   layout="wide", initial_sidebar_state="collapsed")
+
+# --- sign-in gate: must happen before anything user-scoped runs ------
+_uid = get_query_user()
+if not _uid:
+    st.markdown("## ◆ Elastocaloric rig control — sign in")
+    st.caption(
+        "Enter any handle to identify your session — no password. Two "
+        "people using different handles on this same shared link get "
+        "completely separate settings, files, runs and AI history. "
+        "Using the same handle again (e.g. after closing the tab) "
+        "restores that session's saved configuration.")
+    with st.form("signin"):
+        handle = st.text_input("Your name or handle", max_chars=60)
+        go = st.form_submit_button("Continue", type="primary")
+    if go:
+        uid = _slugify(handle) or uuid.uuid4().hex[:8]
+        ensure_user(uid)
+        set_query_user(uid)
+        st.rerun()
+    st.stop()
+
+USER_ID = _uid
+ensure_user(USER_ID)
 
 
 def hex_to_rgba(hex_color: str, alpha: float) -> str:
@@ -441,470 +801,294 @@ def hex_to_rgba(hex_color: str, alpha: float) -> str:
 
 
 def get_theme(dark: bool) -> dict:
+    """Semantic theme tokens. Every color the UI uses is named here
+    once; nothing downstream should hardcode a hex value."""
     if dark:
-        return dict(INK="#E8EEF3", STEEL="#93A5B4", COLD="#35C3E8",
+        base = dict(INK="#E8EEF3", STEEL="#93A5B4", COLD="#35C3E8",
                     WARM="#F2A65A", GOOD="#4ADE9B", LINE="#2A3B47",
-                    PAPER="#16222B", APP_BG="#0B141A")
-    return dict(INK="#12232E", STEEL="#4A6572", COLD="#0E7C9B",
-               WARM="#B45309", GOOD="#1F7A5A", LINE="#C7D2DB",
-               PAPER="#FFFFFF", APP_BG="#E8EDF1")
-
-
-# ---------------------------------------------------------------
-# Factory defaults for every configuration widget. Used both to
-# seed the app on first load and to power "Restore factory defaults".
-# ---------------------------------------------------------------
-
-DEFAULTS = {
-    "w_theme": True,                 # False = light, True = dark — dark is
-                                      # the default per spec; reset never
-                                      # touches this key (see _THEME_KEY).
-    "w_material": "niti",
-    "w_form": "tube",
-    "w_custom_area": 50.0,
-    "w_custom_perimeter": 30.0,
-    "w_n_elements": 5,
-    "w_length": 150.0,
-    "w_od": 12.0,
-    "w_id": 10.0,
-    "w_strain": round(MATERIALS["niti"].eps_tr * 100 * 0.9, 1),
-    # Boundary-condition panel. "w_bc_disp_mm" defaults to whatever the
-    # standard strain/length defaults above already imply, purely so the
-    # two views agree with each other if a person switches straight to
-    # User Defined without touching anything first.
-    "w_bc_mode": "Fixed + Displacement",
-    "w_bc_fixed_end": "Left",
-    "w_bc_direction": "Tension (elongation)",
-    "w_bc_disp_mm": round(
-        150.0 * (MATERIALS["niti"].eps_tr * 100 * 0.9) / 100, 2),
-    "w_compression": False,
-    "w_phase_time": 10.0,
-    "w_eta": 0.70,
-    "w_hx": "finned_air",
-    "w_flow": 50.0,
-    "w_ambient": 25.0,
-    "w_target": 10.0,
-    "w_chamber_cap": 800.0,
-    "w_insulation": 0.35,
-    "w_regen": 0.0,
-    "w_auto": True,
-    "w_cycles_update": 4,
-}
-
-# If a factory-reset was requested on the previous run, apply it now,
-# BEFORE any widget is instantiated, so every control snaps back.
-# Display preference, not a rig setting — a reset should never change
-# how the screen looks, only what it's simulating. Kept out of the
-# factory-restore loop below on purpose.
-_THEME_KEY = "w_theme"
-
-if st.session_state.get("_do_restore"):
-    for _k, _v in DEFAULTS.items():
-        if _k == _THEME_KEY:
-            continue
-        st.session_state[_k] = _v
-    # Also wipe anything the material expert or the combination-comparison
-    # panel left behind (their result tables, picks, prior inputs), so a
-    # factory reset genuinely clears the whole screen, not just the
-    # sidebar sliders.
-    for _k in list(st.session_state.keys()):
-        if _k.startswith("ae_"):
-            del st.session_state[_k]
-    st.session_state["_do_restore"] = False
-    st.session_state["_pending_full_reset"] = True
-
-# Any code that wants to change a "w_*" sidebar setting from a button
-# click (the expert agent, the comparison panel) must NOT write to
-# st.session_state["w_..."] directly from inside that button's handler —
-# by the time that handler runs, the sidebar has already instantiated a
-# widget bound to that key for this script run, and Streamlit raises
-# StreamlitWidgetAlreadyInstantiatedError if you try to overwrite it
-# afterward. Instead those handlers set "_pending_apply" and call
-# st.rerun(); this block picks it up and applies it here, before the
-# sidebar widgets exist for the new run, which is the only point where
-# it's safe to do.
-if st.session_state.get("_pending_apply"):
-    for _k, _v in st.session_state.pop("_pending_apply").items():
-        st.session_state[_k] = _v
-
-# Seed any missing keys (first load only — setdefault is a no-op after).
-for _k, _v in DEFAULTS.items():
-    st.session_state.setdefault(_k, _v)
-
-
-def style_axes(ax, theme: dict):
-    ax.set_facecolor(theme["PAPER"])
-    ax.figure.patch.set_facecolor(theme["PAPER"])
-    for side in ("top", "right"):
-        ax.spines[side].set_visible(False)
-    for side in ("left", "bottom"):
-        ax.spines[side].set_color(theme["LINE"])
-    ax.tick_params(colors=theme["STEEL"], labelsize=8)
-    ax.grid(True, color=theme["LINE"], linewidth=0.6, alpha=0.7)
-    ax.set_axisbelow(True)
-    ax.xaxis.label.set_color(theme["STEEL"])
-    ax.yaxis.label.set_color(theme["STEEL"])
-    ax.xaxis.label.set_size(9)
-    ax.yaxis.label.set_size(9)
-
-
-# --- sidebar: configuration ---------------------------------------
-with st.sidebar:
-    st.markdown("### Reset")
-    if st.button("↺ Restore factory defaults", use_container_width=True,
-                 type="primary",
-                 help="Resets every rig setting — material, geometry, "
-                      "loading, exchanger, thermal, control mode — and "
-                      "clears the run. Your dark/light theme choice is a "
-                      "display preference, not a rig setting, so it is "
-                      "left untouched."):
-        st.session_state["_do_restore"] = True
-        st.rerun()
-    st.caption(
-        "Resets settings **and** the run. For clearing just the run data "
-        "without touching your settings, use **Reset run data** in the "
-        "control bar below the dashboard."
-    )
-
-    st.markdown("### Display")
-    dark_mode = st.toggle("Dark theme", key="w_theme")
-
-    st.markdown("### Rig configuration")
-    mat_key = st.selectbox("Active material", list(MATERIALS),
-                           format_func=lambda k: MATERIALS[k].name,
-                           key="w_material")
-    mat = MATERIALS[mat_key]
-    form = st.radio("Element form", ["tube", "wire", "custom"],
-                    horizontal=True, key="w_form",
-                    help="Tube and wire compute cross-section and surface "
-                         "area from diameters. Custom lets you enter a "
-                         "measured or specified area directly, for "
-                         "geometries that don't fit either preset.")
-    n_elements = st.number_input("Elements in bundle", 1, 40, step=1,
-                                 key="w_n_elements")
-    length_mm = st.number_input("Active length (mm)", 20.0, 500.0, step=5.0,
-                                key="w_length")
-    if form == "custom":
-        custom_area_mm2 = st.number_input(
-            "Cross-section area, per element (mm²)", 0.5, 500.0, step=1.0,
-            key="w_custom_area",
-            help="The load-bearing cross-section of one element.")
-        custom_perimeter_mm = st.number_input(
-            "Wetted perimeter, per element (mm)", 0.5, 200.0, step=1.0,
-            key="w_custom_perimeter",
-            help="The perimeter exposed to the coolant, per element.")
-        od_mm, id_mm = 12.0, 10.0   # unused in this branch; kept as a
-                                    # stable default so Config always has
-                                    # a valid value regardless of form.
+                    PAPER="#16222B", APP_BG="#0B141A",
+                    ERROR="#F87171", COLD_HOVER="#1BA9CE")
     else:
-        custom_area_mm2, custom_perimeter_mm = 50.0, 30.0
-        od_mm = st.number_input("Outer diameter (mm)", 0.5, 30.0, step=0.5,
-                                key="w_od")
-        id_mm = st.number_input("Bore diameter (mm)", 0.1, 29.0, step=0.5,
-                                disabled=(form == "wire"), key="w_id")
+        base = dict(INK="#12232E", STEEL="#4A6572", COLD="#0E7C9B",
+                   WARM="#B45309", GOOD="#1F7A5A", LINE="#C7D2DB",
+                   PAPER="#FFFFFF", APP_BG="#E8EDF1",
+                   ERROR="#C0392B", COLD_HOVER="#0B657F")
+    base["SUCCESS"] = base["GOOD"]
+    base["WARNING"] = base["WARM"]
+    base["INFOC"] = base["COLD"]
+    base["BTN_BG"] = base["PAPER"]
+    base["BTN_TEXT"] = base["INK"]
+    return base
 
-    st.markdown("### Boundary Conditions")
-    st.caption(
-        "One end of the NiTi element is always Fixed; the opposite end is "
-        "always Displacement-controlled. This rule can't be broken from "
-        "this control — picking a Fixed end automatically makes the "
-        "other end the Displacement end."
-    )
-    bc_mode = st.selectbox(
-        "Support configuration",
-        ["Fixed + Displacement", "User Defined"], key="w_bc_mode",
-        help="Fixed + Displacement: the standard setup — magnitude and "
-             "direction follow the strain and loading-direction controls "
-             "below. User Defined: specify the displacement end, "
-             "direction and magnitude directly.")
-    bc_fixed_end = st.radio(
-        "Fixed end", ["Left", "Right"], horizontal=True, key="w_bc_fixed_end")
-    bc_other_end = "Right" if bc_fixed_end == "Left" else "Left"
-    st.caption(f"Fixed end: **{bc_fixed_end}**  ·  "
-              f"Displacement end: **{bc_other_end}** (set automatically)")
 
-    if bc_mode == "User Defined":
-        bc_direction = st.radio(
-            "Displacement direction",
-            ["Tension (elongation)", "Compression (contraction)"],
-            key="w_bc_direction")
-        bc_disp_max_mm = round(length_mm * 0.10, 2)
-        bc_disp_mm = st.number_input(
-            "Displacement magnitude (mm)", 0.05, max(0.1, bc_disp_max_mm),
-            step=0.05, key="w_bc_disp_mm",
-            help=f"Bounded to 10% of the {length_mm:.0f} mm active length "
-                 f"as a generic mechanical-stroke limit.")
-        _bc_eff_strain_preview = round(bc_disp_mm / length_mm * 100, 2) \
-            if length_mm > 0 else 0.0
-        _mat_preview = MATERIALS[mat_key]
-        st.caption(f"Equivalent strain: **{_bc_eff_strain_preview:.2f}%** "
-                  f"of a {length_mm:.0f} mm element.")
-        if _bc_eff_strain_preview > _mat_preview.eps_tr * 100 * 1.15:
-            st.warning(
-                f"This displacement implies {_bc_eff_strain_preview:.1f}% "
-                f"strain, past {_mat_preview.name.split('(')[0].strip()}'s "
-                f"{_mat_preview.eps_tr*100:.1f}% transformation plateau. "
-                f"Reduce the displacement or expect a plastic-deformation "
-                f"alarm below.")
-    else:
-        bc_direction = None
-        bc_disp_mm = None
-        st.caption(
-            "Magnitude and direction are taken from **Applied strain** and "
-            "**Compressive loading** in the Loading section below.")
+# --- persisted per-user state, loaded once per session ---------------
+if "active" not in st.session_state:
+    st.session_state["active"] = full_active_dict(USER_ID)
+if "theme_dark" not in st.session_state:
+    st.session_state["theme_dark"] = load_pref_dark(USER_ID)
+if "ai_ctx" not in st.session_state:
+    st.session_state["ai_ctx"] = load_ai_context(USER_ID)
 
-    st.markdown("### Loading")
-    strain_mn, strain_mx = 0.5, max(8.0, mat.eps_tr * 100 * 1.3)
-    st.session_state["w_strain"] = min(max(
-        st.session_state["w_strain"], strain_mn), strain_mx)
-    _bc_overrides_loading = (bc_mode == "User Defined")
-    strain_pct = st.slider(
-        "Applied strain (%)", strain_mn, strain_mx, step=0.1, key="w_strain",
-        disabled=_bc_overrides_loading,
-        help=("Set by the Boundary Conditions panel above while User "
-              "Defined is selected." if _bc_overrides_loading else
-              f"Transformation plateau ends near {mat.eps_tr * 100:.1f}%."))
-    compression = st.toggle("Compressive loading", key="w_compression",
-                            disabled=_bc_overrides_loading)
-    if _bc_overrides_loading:
-        st.caption("↑ Controlled by Boundary Conditions above.")
-    phase_time = st.slider("Phase duration (s)", 0.2, 60.0, step=0.1,
-                           key="w_phase_time")
-    eta_act = st.slider("Actuator efficiency", 0.3, 0.95, step=0.05,
-                        key="w_eta")
+# Apply requests raised from the AI assistant (or a factory-restore on
+# the Settings tab) are staged here and consumed at the very top of the
+# script, BEFORE the Settings tab's widgets are instantiated for this
+# run — writing into an already-instantiated widget's session_state key
+# raises StreamlitWidgetAlreadyInstantiatedError, so this staging +
+# rerun pattern is the safe way to change a "d_*" value programmatically.
+if st.session_state.get("_pending_settings"):
+    for k, v in st.session_state.pop("_pending_settings").items():
+        st.session_state[f"d_{k}"] = v
 
-    st.markdown("### Heat transfer")
-    hx_key = st.selectbox("Exchanger", list(EXCHANGERS),
-                          format_func=lambda k: EXCHANGERS[k].name,
-                          key="w_hx")
-    flow_cfm = st.slider("Coolant flow (CFM equivalent)", 10.0, 150.0,
-                         step=5.0, key="w_flow")
+if st.session_state.get("_pending_apply_active"):
+    new_active = st.session_state.pop("_pending_apply_active")
+    st.session_state["active"] = new_active
+    save_active_config(USER_ID, new_active)
+    st.session_state["_run_reset_reason"] = st.session_state.pop(
+        "_pending_apply_reason", "Configuration applied.")
 
-    st.markdown("### Enclosure (cold box)")
-    ambient_c = st.number_input("Ambient (°C)", 5.0, 45.0, step=1.0,
-                                key="w_ambient")
-    target_c = st.number_input("Target (°C)", -40.0, 40.0, step=1.0,
-                               key="w_target")
-    chamber_cap = st.number_input("Chamber heat capacity (J/K)",
-                                  50.0, 20000.0, step=50.0,
-                                  key="w_chamber_cap",
-                                  help="Air, payload and inner wall combined.")
-    insulation_ua = st.number_input("Cabinet loss (W/K)", 0.05, 5.0,
-                                    step=0.05, key="w_insulation")
+for k, v in ACTIVE_DEFAULTS.items():
+    st.session_state.setdefault(f"d_{k}", st.session_state["active"].get(k, v))
 
-    st.markdown("### Advanced")
-    regen_eff = st.slider(
-        "Regenerator effectiveness", 0.0, 0.8, step=0.05, key="w_regen",
-        help="0 = no regenerator (a single element, exactly as before). "
-             "Recycling heat between the hot and cold halves of the cycle "
-             "lets the machine pump across a span far larger than one "
-             "element's own adiabatic swing — this is the single biggest "
-             "lever for reaching colder targets or raising COP, more "
-             "effective than strain, exchanger choice or phase timing "
-             "alone.")
-    if regen_eff > 0:
-        st.caption(f"Effective temperature swing is being multiplied "
-                  f"×{1/(1-min(regen_eff,0.8)):.2f} by the regenerator.")
+theme = get_theme(st.session_state["theme_dark"])
 
-    st.markdown("### Control")
-    auto_mode = st.toggle("Automatic sequencing", key="w_auto")
-    cycles_per_update = st.slider("Cycles per screen update", 1, 20,
-                                  key="w_cycles_update")
 
-theme = get_theme(dark_mode)
-
-st.markdown(f"""
+def inject_css(t: dict) -> None:
+    st.markdown(f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
 
-/* Tell Streamlit's own components (labels, captions, sidebar text,
-   buttons, widget option text) which colors to use. These CSS custom
-   properties are what Streamlit's native widgets actually read from —
-   setting color on html/body alone does not reach them, which is why
-   text could go white-on-white after switching themes. */
 :root, .stApp {{
-    --text-color: {theme["INK"]};
-    --background-color: {theme["APP_BG"]};
-    --secondary-background-color: {theme["PAPER"]};
+    --text-color: {t["INK"]};
+    --background-color: {t["APP_BG"]};
+    --secondary-background-color: {t["PAPER"]};
 }}
-
-html, body, [class*="css"] {{ font-family:'IBM Plex Sans',system-ui,sans-serif;
-  color:{theme["INK"]}; }}
-.stApp {{ background:{theme["APP_BG"]}; }}
-.block-container {{ max-width:1480px; padding-top:1.2rem; }}
-
-/* Explicit safety net: force every native Streamlit text element to
-   the current theme's ink color, regardless of what the browser's own
-   light/dark preference or a previous render left behind. */
-section[data-testid="stSidebar"] {{
-    background:{theme["APP_BG"]};
-}}
-section[data-testid="stSidebar"] label,
-section[data-testid="stSidebar"] p,
-section[data-testid="stSidebar"] span,
-section[data-testid="stSidebar"] div[data-testid="stMarkdownContainer"] {{
-    color:{theme["INK"]} !important;
-}}
-[data-testid="stWidgetLabel"] p,
-[data-testid="stWidgetLabel"] label,
-[data-testid="stMarkdownContainer"] p,
-[data-testid="stMarkdownContainer"] li,
-[data-testid="stMarkdownContainer"] strong,
-[data-testid="stCaptionContainer"],
-[data-testid="stCaptionContainer"] p,
-[data-testid="stExpander"] summary,
-[data-testid="stExpander"] summary p,
-[data-testid="stRadio"] label p,
-[data-testid="stSelectbox"] label p,
-[data-testid="stNumberInput"] label p,
-[data-testid="stSlider"] label p {{
-    color:{theme["INK"]} !important;
-}}
-/* Radio / selectbox option text and dropdown menus */
-div[role="radiogroup"] label span,
-li[role="option"], div[data-baseweb="select"] * {{
-    color:{theme["INK"]} !important;
-}}
-/* Secondary (non-primary) buttons should read in ink, not a stuck white */
-.stButton button[kind="secondary"] p {{
-    color:{theme["INK"]} !important;
-}}
-.titlebar {{ display:flex; align-items:baseline; gap:18px;
-  border-bottom:2px solid {theme["INK"]}; padding-bottom:10px; margin-bottom:22px; }}
-.titlebar h1 {{ font-size:24px; font-weight:600; color:{theme["INK"]}; margin:0; }}
-.titlebar span {{ font-size:13px; color:{theme["STEEL"]}; }}
-.verdict {{ background:{theme["PAPER"]}; border:1px solid {theme["LINE"]};
-  border-left:5px solid {theme["COLD"]}; border-radius:4px; padding:20px 24px; }}
-.verdict.blocked {{ border-left-color:{theme["WARM"]}; }}
-.verdict h2 {{ font-size:20px; font-weight:600; color:{theme["INK"]}; margin:0 0 6px; }}
-.verdict p {{ font-size:14px; color:{theme["STEEL"]}; margin:0; line-height:1.6;
-  max-width:78ch; }}
-.figure {{ font-family:'IBM Plex Mono',monospace; font-variant-numeric:tabular-nums;
-  font-size:26px; font-weight:500; color:{theme["INK"]}; }}
-.figure small {{ font-size:13px; color:{theme["STEEL"]}; font-weight:400; }}
-.cap {{ font-size:12px; color:{theme["STEEL"]}; margin-bottom:2px; }}
-.step {{ background:{theme["PAPER"]}; border:1px solid {theme["LINE"]}; border-radius:4px;
-  padding:14px 16px; min-height:124px; }}
-.step.active {{ border:1px solid {theme["WARM"]};
-  background:{hex_to_rgba(theme["WARM"], 0.08)}; }}
-.step.done {{ border-left:4px solid {theme["GOOD"]}; }}
-.step .n {{ font-family:'IBM Plex Mono',monospace; font-size:12px; color:{theme["STEEL"]}; }}
-.step .t {{ font-size:15px; font-weight:600; color:{theme["INK"]}; margin-top:6px; }}
-.step .d {{ font-size:12px; color:{theme["STEEL"]}; margin-top:6px; line-height:1.5; }}
-.chip {{ display:inline-block; padding:3px 10px; border-radius:3px;
-  font-size:11px; font-weight:600; }}
-.chip.run {{ background:{hex_to_rgba(theme["WARM"], 0.16)}; color:{theme["WARM"]}; }}
-.chip.hold {{ background:{hex_to_rgba(theme["GOOD"], 0.16)}; color:{theme["GOOD"]}; }}
-.chip.idle {{ background:{hex_to_rgba(theme["STEEL"], 0.16)}; color:{theme["STEEL"]}; }}
-.extreme {{ background:{theme["PAPER"]}; border:1px solid {theme["LINE"]};
-  border-radius:4px; padding:10px 14px; }}
+html, body, [class*="css"] {{ font-family:'IBM Plex Sans',system-ui,sans-serif; }}
+.stApp {{ background:{t["APP_BG"]}; }}
+.block-container {{ max-width:1480px; padding-top:1.0rem; }}
 footer, #MainMenu {{ visibility:hidden; }}
 
 /* -----------------------------------------------------------------
-   THEME ENFORCEMENT
-   Streamlit renders some elements (dropdown menus, multiselect popovers,
-   tags) in a portal attached to the page body rather than inside this
-   app's own container, and Streamlit has its own separate light/dark
-   setting that can silently disagree with this toggle. Both are forced
-   below with !important so text can never end up matching its own
-   background regardless of what the browser or a prior render left
-   behind. Rules here are written to be no more specific than a single
-   class + universal selector, so the app's own semantic colors above
-   (.figure, .chip, .verdict, .step) — being more specific selectors —
-   still win where they're meant to.
+   BLANKET RULE + targeted overrides. Streamlit renders many widgets
+   (selects, sliders, dataframes, alerts, popovers) in generic divs
+   whose own default styling is theme-agnostic, so a blanket text
+   color plus explicit background rules for every widget family is
+   the reliable way to avoid dark-on-dark / light-on-light patches —
+   a single CSS patch per bug report does not scale to this many
+   component types.
    ------------------------------------------------------------------ */
-.stApp, .stApp * {{ color:{theme["INK"]} !important; }}
-/* These are more specific than ".stApp *" above (two classes beats one
-   class + universal), so they win automatically without needing to
-   "undo" the blanket rule first. */
-.figure {{ color:{theme["INK"]} !important; }}
-.figure small {{ color:{theme["STEEL"]} !important; }}
-.cap {{ color:{theme["STEEL"]} !important; }}
-.verdict h2 {{ color:{theme["INK"]} !important; }}
-.verdict p {{ color:{theme["STEEL"]} !important; }}
-.step .n {{ color:{theme["STEEL"]} !important; }}
-.step .t {{ color:{theme["INK"]} !important; }}
-.step .d {{ color:{theme["STEEL"]} !important; }}
-.chip.run {{ color:{theme["WARM"]} !important; }}
-.chip.hold {{ color:{theme["GOOD"]} !important; }}
-.chip.idle {{ color:{theme["STEEL"]} !important; }}
+.stApp, .stApp * {{ color:{t["INK"]} !important; }}
 
-section[data-testid="stSidebar"] {{ background:{theme["APP_BG"]} !important; }}
-
-/* Dropdown / multiselect popovers are portalled to <body>, outside
-   .stApp, so they need their own explicit background + text pairing. */
-div[data-baseweb="popover"],
-div[data-baseweb="popover"] ul,
-ul[role="listbox"] {{
-    background:{theme["PAPER"]} !important;
+/* Headings / captions / labels */
+[data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] p {{
+    color:{t["STEEL"]} !important;
 }}
-div[data-baseweb="popover"] *,
-li[role="option"],
-div[data-baseweb="tag"] {{
-    color:{theme["INK"]} !important;
-}}
-li[role="option"]:hover,
-li[aria-selected="true"] {{
-    background:{hex_to_rgba(theme["COLD"], 0.14)} !important;
-}}
-div[data-baseweb="tag"] {{
-    background:{hex_to_rgba(theme["COLD"], 0.18)} !important;
+[data-testid="stWidgetLabel"] p, [data-testid="stWidgetLabel"] label {{
+    color:{t["INK"]} !important;
 }}
 
-/* Inputs, selects and their placeholder/value text */
+/* Tabs */
+[data-testid="stTabs"] [data-baseweb="tab-list"] {{
+    background:{t["APP_BG"]} !important; gap:4px;
+    border-bottom:1px solid {t["LINE"]} !important;
+}}
+[data-testid="stTabs"] button[role="tab"] {{
+    background:transparent !important; color:{t["STEEL"]} !important;
+    border-radius:4px 4px 0 0 !important;
+}}
+[data-testid="stTabs"] button[role="tab"] p {{ color:inherit !important; }}
+[data-testid="stTabs"] button[aria-selected="true"] {{
+    color:{t["COLD"]} !important; border-bottom:2px solid {t["COLD"]} !important;
+}}
+
+/* Buttons — primary / secondary / download / form-submit */
+.stButton button[kind="primary"], .stButton button[kind="primary"] p,
+[data-testid="baseButton-primary"], [data-testid="baseButton-primary"] p {{
+    background:{t["COLD"]} !important; color:#FFFFFF !important;
+    border:1px solid {t["COLD"]} !important;
+}}
+.stButton button[kind="primary"]:hover {{ background:{t["COLD_HOVER"]} !important; }}
+.stButton button[kind="secondary"], .stButton button[kind="secondary"] p,
+[data-testid="baseButton-secondary"], [data-testid="baseButton-secondary"] p,
+div[data-testid="stDownloadButton"] button,
+div[data-testid="stDownloadButton"] button p,
+div[data-testid="stFormSubmitButton"] button,
+div[data-testid="stFormSubmitButton"] button p {{
+    background:{t["BTN_BG"]} !important; color:{t["BTN_TEXT"]} !important;
+    border:1px solid {t["LINE"]} !important;
+}}
+.stButton button:hover, div[data-testid="stDownloadButton"] button:hover {{
+    border-color:{t["COLD"]} !important;
+    background:{hex_to_rgba(t["COLD"], 0.10)} !important;
+}}
+button:disabled, button:disabled p {{ opacity:0.45 !important; }}
+
+/* Inputs: text, number, textarea, select, multiselect, file uploader */
 input, textarea,
-div[data-baseweb="select"] > div {{
-    background:{theme["PAPER"]} !important;
-    color:{theme["INK"]} !important;
+div[data-baseweb="select"] > div,
+div[data-baseweb="base-input"] {{
+    background:{t["PAPER"]} !important; color:{t["INK"]} !important;
+    border-color:{t["LINE"]} !important;
 }}
+[data-testid="stFileUploaderDropzone"] {{
+    background:{t["PAPER"]} !important; border:1px dashed {t["LINE"]} !important;
+}}
+[data-testid="stFileUploaderDropzone"] * {{ color:{t["STEEL"]} !important; }}
+[data-testid="stFileUploaderDropzone"] button {{
+    background:{t["BTN_BG"]} !important; color:{t["BTN_TEXT"]} !important;
+    border:1px solid {t["LINE"]} !important;
+}}
+
+/* Portalled popovers / dropdown menus (rendered outside .stApp) */
+div[data-baseweb="popover"], div[data-baseweb="popover"] ul,
+ul[role="listbox"] {{ background:{t["PAPER"]} !important; }}
+div[data-baseweb="popover"] *, li[role="option"], div[data-baseweb="tag"] {{
+    color:{t["INK"]} !important;
+}}
+li[role="option"]:hover, li[aria-selected="true"] {{
+    background:{hex_to_rgba(t["COLD"], 0.14)} !important;
+}}
+div[data-baseweb="tag"] {{ background:{hex_to_rgba(t["COLD"], 0.18)} !important; }}
+
+/* Sliders */
+div[data-baseweb="slider"] [role="slider"] {{ background:{t["COLD"]} !important; }}
+div[data-baseweb="slider"] > div > div {{ background:{t["LINE"]} !important; }}
+div[data-baseweb="slider"] > div > div > div {{ background:{t["COLD"]} !important; }}
+
+/* Checkbox / radio */
+[data-testid="stCheckbox"] label, [data-testid="stRadio"] label {{
+    color:{t["INK"]} !important;
+}}
+[data-baseweb="radio"] div:first-child, [data-baseweb="checkbox"] div:first-child {{
+    border-color:{t["STEEL"]} !important;
+}}
+
+/* Alerts: success / info / warning / error */
+[data-testid="stAlert"] {{
+    background:{t["PAPER"]} !important; border:1px solid {t["LINE"]} !important;
+}}
+div[data-testid="stAlertContentSuccess"] {{ border-left:4px solid {t["SUCCESS"]} !important; }}
+div[data-testid="stAlertContentInfo"] {{ border-left:4px solid {t["INFOC"]} !important; }}
+div[data-testid="stAlertContentWarning"] {{ border-left:4px solid {t["WARNING"]} !important; }}
+div[data-testid="stAlertContentError"] {{ border-left:4px solid {t["ERROR"]} !important; }}
+
+/* Dataframes / tables */
+[data-testid="stDataFrame"], [data-testid="stTable"] {{
+    background:{t["PAPER"]} !important;
+}}
+[data-testid="stDataFrame"] * {{ color:{t["INK"]} !important; }}
+
+/* Metrics */
+[data-testid="stMetric"] {{
+    background:{t["PAPER"]} !important; border:1px solid {t["LINE"]} !important;
+    border-radius:6px; padding:8px 12px;
+}}
+[data-testid="stMetricLabel"] * {{ color:{t["STEEL"]} !important; }}
+[data-testid="stMetricValue"] * {{ color:{t["INK"]} !important; }}
+
+/* Expander */
+[data-testid="stExpander"] {{
+    background:{t["PAPER"]} !important; border:1px solid {t["LINE"]} !important;
+    border-radius:6px;
+}}
+[data-testid="stExpander"] summary p {{ color:{t["INK"]} !important; }}
+
+/* Toast */
+[data-testid="stToast"] {{
+    background:{t["PAPER"]} !important; color:{t["INK"]} !important;
+    border:1px solid {t["LINE"]} !important;
+}}
+
+/* App-specific semantic classes */
+.titlebar {{ display:flex; align-items:baseline; gap:18px;
+  border-bottom:2px solid {t["INK"]}; padding-bottom:10px; margin-bottom:18px; }}
+.titlebar h1 {{ font-size:24px; font-weight:600; margin:0; }}
+.titlebar span {{ font-size:13px; color:{t["STEEL"]} !important; }}
+.verdict {{ background:{t["PAPER"]}; border:1px solid {t["LINE"]};
+  border-left:5px solid {t["COLD"]}; border-radius:4px; padding:20px 24px; }}
+.verdict.blocked {{ border-left-color:{t["WARM"]}; }}
+.verdict h2 {{ font-size:20px; font-weight:600; margin:0 0 6px; }}
+.verdict p {{ font-size:14px; color:{t["STEEL"]} !important; margin:0;
+  line-height:1.6; max-width:78ch; }}
+.figure {{ font-family:'IBM Plex Mono',monospace; font-variant-numeric:tabular-nums;
+  font-size:26px; font-weight:500; }}
+.figure small {{ font-size:13px; color:{t["STEEL"]} !important; font-weight:400; }}
+.cap {{ font-size:12px; color:{t["STEEL"]} !important; margin-bottom:2px; }}
+.step {{ background:{t["PAPER"]}; border:1px solid {t["LINE"]}; border-radius:4px;
+  padding:14px 16px; min-height:118px; }}
+.step.active {{ border:1px solid {t["WARM"]};
+  background:{hex_to_rgba(t["WARM"], 0.08)}; }}
+.step.done {{ border-left:4px solid {t["GOOD"]}; }}
+.step .n {{ font-family:'IBM Plex Mono',monospace; font-size:12px;
+  color:{t["STEEL"]} !important; }}
+.step .t {{ font-size:15px; font-weight:600; margin-top:6px; }}
+.step .d {{ font-size:12px; color:{t["STEEL"]} !important; margin-top:6px;
+  line-height:1.5; }}
+.chip {{ display:inline-block; padding:3px 10px; border-radius:3px;
+  font-size:11px; font-weight:600; }}
+.chip.run {{ background:{hex_to_rgba(t["WARM"], 0.16)}; color:{t["WARM"]} !important; }}
+.chip.hold {{ background:{hex_to_rgba(t["GOOD"], 0.16)}; color:{t["GOOD"]} !important; }}
+.chip.idle {{ background:{hex_to_rgba(t["STEEL"], 0.16)}; color:{t["STEEL"]} !important; }}
+.extreme {{ background:{t["PAPER"]}; border:1px solid {t["LINE"]};
+  border-radius:4px; padding:10px 14px; }}
+.ctrl-log {{ background:{t["PAPER"]}; border:1px solid {t["LINE"]};
+  border-radius:6px; padding:12px 14px; max-height:220px; overflow-y:auto;
+  font-family:'IBM Plex Mono',monospace; font-size:12px; line-height:1.7; }}
+.ctrl-log .ts {{ color:{t["STEEL"]} !important; }}
+.activebar {{ background:{t["PAPER"]}; border:1px solid {t["LINE"]};
+  border-radius:6px; padding:10px 18px; margin-top:8px; display:flex;
+  flex-wrap:wrap; gap:22px; font-size:12.5px; color:{t["STEEL"]} !important; }}
+.activebar b {{ color:{t["INK"]} !important; }}
+.unsaved-banner {{ background:{hex_to_rgba(t["WARM"], 0.12)};
+  border:1px solid {t["WARM"]}; border-radius:6px; padding:10px 16px;
+  margin-bottom:14px; font-size:13.5px; }}
 </style>
 """, unsafe_allow_html=True)
 
-# Resolve the two possible sources of strain/direction into the single
-# pair the physics actually uses. This is a plain local-variable choice,
-# made once per script run — it does not write back into either widget's
-# session_state key, so it can't trigger the
-# StreamlitWidgetAlreadyInstantiatedError class of bug and needs no
-# st.rerun() to take effect. Changing Support configuration therefore
-# updates the simulation on the very next run, live, without any reset.
-if bc_mode == "User Defined":
-    effective_strain_pct = round(bc_disp_mm / length_mm * 100, 3) \
-        if length_mm > 0 else strain_pct
-    effective_compression = (bc_direction == "Compression (contraction)")
-else:
-    effective_strain_pct = strain_pct
-    effective_compression = compression
 
-cfg = Config(material_key=mat_key, exchanger_key=hx_key, form=form,
-             n_elements=int(n_elements), length_mm=length_mm, od_mm=od_mm,
-             id_mm=id_mm, strain_pct=effective_strain_pct,
-             mode_compression=effective_compression,
-             phase_time_s=phase_time, flow_cfm=flow_cfm, ambient_c=ambient_c,
-             target_c=target_c, chamber_capacity=chamber_cap,
-             insulation_ua=insulation_ua, actuator_efficiency=eta_act,
-             regen_effectiveness=regen_eff,
-             custom_area_mm2=custom_area_mm2,
-             custom_perimeter_mm=custom_perimeter_mm)
+inject_css(theme)
 
-# --- run-time session state (separate from the widget/config state) ----
-MAX_POINTS = 2400
+# ---------------------------------------------------------------------
+# Header: title, signed-in-as badge, theme toggle, sign out
+# ---------------------------------------------------------------------
+hc1, hc2, hc3 = st.columns([5, 2, 1.4])
+with hc1:
+    st.markdown('<div class="titlebar"><h1>Elastocaloric refrigeration rig'
+               '</h1><span>NiTi SCADA / HMI</span></div>',
+               unsafe_allow_html=True)
+with hc2:
+    st.caption(f"Signed in as **{USER_ID}** — this handle's settings, files "
+              f"and runs are private to it.")
+with hc3:
+    new_dark = st.toggle("Dark theme", value=st.session_state["theme_dark"],
+                         key="theme_toggle")
+    if new_dark != st.session_state["theme_dark"]:
+        st.session_state["theme_dark"] = new_dark
+        save_pref_dark(USER_ID, new_dark)
+        st.rerun()
+    if st.button("Sign out", use_container_width=True):
+        clear_query_user()
+        for k in list(st.session_state.keys()):
+            del st.session_state[k]
+        st.rerun()
 
-# A person's saved snapshots are their own archive — not a rig setting
-# (untouched by "Restore factory defaults") and not run telemetry
-# (untouched by "Reset run data"). Only the explicit "Clear saved runs"
-# button below empties it.
-st.session_state.setdefault("saved_runs", [])
-st.session_state.setdefault("has_downloaded", False)
+# ---------------------------------------------------------------------
+# Build the Config currently in effect for THIS user from st.session_
+# state["active"] — the single source of truth every other part of the
+# app (dashboard, simulation, graphs, AI assistant) reads from.
+# ---------------------------------------------------------------------
+active = st.session_state["active"]
+cfg = settings_to_config(active)
+mat = cfg.material
 
 
+# --- run-time (per-user, per-session) state ---------------------------
 def blank_log():
     return {k: [] for k in ("t", "chamber", "element", "fluid", "strain",
                             "stress", "cop", "cycle", "lift")}
 
 
 def event(msg: str):
-    st.session_state.events.insert(
-        0, f"{datetime.now():%H:%M:%S}  {msg}")
+    st.session_state.events.insert(0, f"{datetime.now():%H:%M:%S}  {msg}")
     del st.session_state.events[40:]
 
 
@@ -917,10 +1101,9 @@ def record():
                      ("cop", s.cop), ("cycle", s.cycle),
                      ("lift", s.q_cold_rate)):
         log[key].append(val)
-    if len(log["t"]) > MAX_POINTS:
+    if len(log["t"]) > 2400:
         for key in log:
             del log[key][0]
-
     ex = st.session_state.extremes
     ex["chamber_max"] = max(ex["chamber_max"], s.t_chamber)
     ex["chamber_min"] = min(ex["chamber_min"], s.t_chamber)
@@ -929,13 +1112,13 @@ def record():
 
 
 def reset(reason: str = "Controller reset."):
-    """Resets the RUN only — cycle count, history, energy tally,
-    max/min tracking. Does not touch the sidebar settings."""
+    """Resets the RUN only (cycle count, history, energy tally, extremes)
+    for this user's session. Never touches the persisted active config."""
     st.session_state.state = initial_state(cfg)
     st.session_state.running = False
     st.session_state.log = blank_log()
     st.session_state.events = []
-    st.session_state.energy = [0.0, 0.0]        # [Q_cold J, W_in J]
+    st.session_state.energy = [0.0, 0.0]
     st.session_state.extremes = {
         "chamber_max": cfg.ambient_c, "chamber_min": cfg.ambient_c,
         "element_max": cfg.ambient_c, "element_min": cfg.ambient_c,
@@ -945,17 +1128,14 @@ def reset(reason: str = "Controller reset."):
 
 
 need_reset = "state" not in st.session_state
-full_restore_pending = st.session_state.pop("_pending_full_reset", False)
-if need_reset or full_restore_pending:
-    reset("Factory defaults restored — all settings and run data cleared."
-          if full_restore_pending else "Controller initialised.")
+run_reset_reason = st.session_state.pop("_run_reset_reason", None)
+if need_reset or run_reset_reason:
+    reset(run_reset_reason or "Controller initialised.")
 
 state: State = st.session_state.state
 
 
 def advance_phase():
-    """Run the next phase. Always reads the live object out of session
-    state — a stale local reference would silently skip updates."""
     cur: State = st.session_state.state
     nxt = cur.phase % 4 + 1
     st.session_state.state = step_phase(cfg, cur, nxt)
@@ -967,44 +1147,21 @@ def advance_phase():
     return s
 
 
-# --- capability analysis -----------------------------------------
-@st.cache_data(show_spinner=False)
-def envelope(cfg_key: tuple):
-    return predict_envelope(Config(*cfg_key))
+st.session_state.setdefault("saved_runs_cache_key", None)
 
-
-env = envelope(tuple(getattr(cfg, f.name) for f in fields(cfg)))
-
-# Computed here (not later, where they were previously) so the AI
-# Engineering Assistant glossary below — which explains phase duration
-# using these exact numbers — has them available.
+env = predict_envelope(cfg)
 tau = cfg.capacity / cfg.ua_hx if cfg.ua_hx > 0 else float("inf")
 effectiveness = 1.0 - math.exp(-cfg.phase_time_s / tau) if tau > 0 else 0.0
-
-# Also computed here, early, for the same reason as tau/effectiveness
-# above — the AI Engineering Assistant glossary and the active-config
-# summary both reference this before the old "live readouts" section
-# (which used to be the only place it was computed) has run.
 q_tot, w_tot = st.session_state.energy
 avg_cop = q_tot / w_tot if w_tot > 0 else 0.0
 
-st.markdown(f"""
-<div class="titlebar"><h1>Elastocaloric refrigeration rig</h1>
-<span>{mat.name} &nbsp;·&nbsp; {EXCHANGERS[hx_key].name}
-&nbsp;·&nbsp; {cfg.n_elements} × {cfg.length_mm:.0f} mm</span></div>
-""", unsafe_allow_html=True)
+_direction_label = "Compression" if cfg.mode_compression else "Tension"
+_form_label = {"tube": "Tube", "wire": "Wire", "custom": "Custom"}.get(
+    cfg.form, cfg.form.title())
 
 
 def render_boundary_diagram(theme_d, fixed_end, is_compression,
                             magnitude_mm, magnitude_pct, mode_label):
-    """
-    Builds the Fixed-end / Displacement-end diagram. Which side carries
-    which label is decided purely by `fixed_end` — there is no code path
-    that can mark both ends, or neither, as Fixed: the function always
-    derives exactly one Displacement end as "whichever end is not
-    Fixed", so the invalid states the spec rules out (both Fixed, both
-    Displacement, neither valid) are structurally unreachable here.
-    """
     rod_color = theme_d["WARM"] if is_compression else theme_d["COLD"]
     verb = "shortens" if is_compression else "elongates"
     sign = "−" if is_compression else "+"
@@ -1012,16 +1169,14 @@ def render_boundary_diagram(theme_d, fixed_end, is_compression,
                   f"font-size:11px'>{sign}{magnitude_mm:.2f} mm "
                   f"({sign}{magnitude_pct:.2f}% strain) · element "
                   f"{verb}</span>")
-
     wall = (f'<div style="display:flex;flex-direction:column;'
            f'align-items:center;gap:6px;min-width:92px">'
            f'<div style="font-size:11px;font-weight:700;'
-           f'color:{theme_d["INK"]};letter-spacing:0.5px">FIXED</div>'
+           f'letter-spacing:0.5px">FIXED</div>'
            f'<div style="width:14px;height:54px;'
            f'background:repeating-linear-gradient(135deg,'
            f'{theme_d["INK"]},{theme_d["INK"]} 3px,transparent 3px,'
            f'transparent 8px);border-radius:2px"></div></div>')
-
     arrow_char = "&#8592;" if (fixed_end == "Right") != is_compression \
         else "&#8594;"
     disp_end = (f'<div style="display:flex;flex-direction:column;'
@@ -1031,14 +1186,10 @@ def render_boundary_diagram(theme_d, fixed_end, is_compression,
                f'{disp_label}</div>'
                f'<div style="font-size:26px;color:{rod_color};'
                f'line-height:1">{arrow_char}</div></div>')
-
     rod = (f'<div style="flex:1;height:16px;border-radius:8px;'
           f'background:linear-gradient(90deg,{rod_color}66,{rod_color});'
           f'margin:0 4px"></div>')
-
-    parts = [wall, rod, disp_end] if fixed_end == "Left" \
-        else [disp_end, rod, wall]
-
+    parts = [wall, rod, disp_end] if fixed_end == "Left" else [disp_end, rod, wall]
     return (f'<div class="verdict" style="display:flex;align-items:center;'
            f'justify-content:center;gap:10px;padding:22px 24px">'
            f'{"".join(parts)}</div>'
@@ -1047,664 +1198,812 @@ def render_boundary_diagram(theme_d, fixed_end, is_compression,
            f'Support configuration: <b>{mode_label}</b></div>')
 
 
-st.markdown(render_boundary_diagram(
-    theme, bc_fixed_end, effective_compression,
-    cfg.strain * cfg.length_mm, effective_strain_pct, bc_mode),
-    unsafe_allow_html=True)
+# =================================================================
+# TAB NAVIGATION
+# =================================================================
+tab_dash, tab_settings, tab_ai = st.tabs(
+    ["📊 SCADA Dashboard", "⚙ User Defined Settings", "🤖 AI Engineering Assistant"])
 
-# ---------------------------------------------------------------------
-# ACTIVE CONFIGURATION — the values actually in effect right now, as
-# opposed to whatever a sidebar widget happens to show. In this app's
-# architecture there's no separate "staged, not yet applied" state:
-# every sidebar control takes effect on the very next script run, so
-# these numbers ARE what's live. Shown here so the main screen states
-# them plainly rather than requiring a trip to the sidebar to confirm.
-# ---------------------------------------------------------------------
-_direction_label = "Compression" if effective_compression else "Tension"
-_form_label = {"tube": "Tube", "wire": "Wire", "custom": "Custom"}.get(
-    cfg.form, cfg.form.title())
-active_rows = [
-    ("Element", f"{_form_label} · {cfg.n_elements} × {cfg.length_mm:.0f} mm"),
-    ("Phase duration", f"{cfg.phase_time_s:.1f} s"),
-    ("Displacement", f"{cfg.strain * cfg.length_mm:.2f} mm ({_direction_label})"),
-    ("Target temperature", f"{cfg.target_c:.1f} °C"),
-    ("Ambient temperature", f"{cfg.ambient_c:.1f} °C"),
-]
-st.markdown(
-    f'<div style="background:{theme["PAPER"]};border:1px solid '
-    f'{theme["LINE"]};border-radius:6px;padding:10px 18px;margin-top:8px;'
-    f'display:flex;flex-wrap:wrap;gap:22px;font-size:12.5px;'
-    f'color:{theme["STEEL"]}">' +
-    "".join(
-        f'<span><b style="color:{theme["INK"]}">{label}:</b> {value}</span>'
-        for label, value in active_rows
-    ) + '</div>', unsafe_allow_html=True)
-st.caption("↑ Currently active — set in the sidebar, applied immediately.")
-st.write("")
-
-with st.expander("Quick guide", expanded=False):
+# -----------------------------------------------------------------
+# TAB 1 — SCADA / OPERATING DASHBOARD
+# Monitoring, active values, live readings, graphs, controller status,
+# results. No detailed editable configuration lives here.
+# -----------------------------------------------------------------
+with tab_dash:
+    active_rows = [
+        ("Element", f"{_form_label} · {cfg.n_elements} × {cfg.length_mm:.0f} mm"),
+        ("Phase duration", f"{cfg.phase_time_s:.1f} s"),
+        ("Displacement", f"{cfg.strain * cfg.length_mm:.2f} mm ({_direction_label})"),
+        ("Target temperature", f"{cfg.target_c:.1f} °C"),
+        ("Ambient temperature", f"{cfg.ambient_c:.1f} °C"),
+        ("Material", mat.name), ("Exchanger", cfg.exchanger.name),
+    ]
     st.markdown(
-        "- The rig runs a **four-phase cycle**: load → reject heat → "
-        "unload → absorb heat. One full pass of all four is one cycle.\n"
-        "- **Start sequencing** runs it automatically; **Step one phase** "
-        "(shown when Automatic sequencing is off) lets you advance one "
-        "phase at a time.\n"
-        "- **Run to steady state** solves forward instantly without "
-        "redrawing every step — use it when you want the answer, not the "
-        "animation.\n"
-        "- **Reset run data** clears the current run but keeps your "
-        "settings. **Restore factory defaults** (top of the sidebar) "
-        "clears everything, including material and geometry — use it if "
-        "the rig ends up in a state you don't understand.\n"
-        "- The **Enclosure & wire extremes** panel below tracks the "
-        "highest and lowest temperature reached since the last reset."
-    )
+        '<div class="activebar">' +
+        "".join(f"<span><b>{label}:</b> {value}</span>"
+               for label, value in active_rows) + "</div>",
+        unsafe_allow_html=True)
+    st.caption("↑ Currently active configuration — edit it in "
+              "**User Defined Settings**, then Apply.")
+    st.write("")
 
-with st.expander("🤖 AI Engineering Assistant", expanded=False):
+    st.markdown(render_boundary_diagram(
+        theme, active["bc_fixed_end"], cfg.mode_compression,
+        cfg.strain * cfg.length_mm,
+        cfg.strain_pct, active["bc_mode"]), unsafe_allow_html=True)
+
+    if env["reachable"]:
+        headline = f"This configuration can hold {cfg.target_c:.1f} °C."
+        body = (f"Predicted pull-down takes {env['cycles_to_target']:.0f} cycles "
+                f"({env['time_to_target_s']/60:.1f} min). The lowest temperature "
+                f"the cold box can sustain is {env['t_min_c']:.1f} °C, so there "
+                f"is {cfg.target_c - env['t_min_c']:.1f} K of margin against "
+                f"the {cfg.insulation_ua:.2f} W/K cabinet load.")
+    else:
+        headline = f"This configuration cannot reach {cfg.target_c:.1f} °C."
+        body = (f"The cold box settles at {env['t_min_c']:.1f} °C, "
+                f"{abs(cfg.target_c - env['t_min_c']):.1f} K short. The adiabatic "
+                f"swing is only {env['dt_adiabatic']:.1f} K at "
+                f"{cfg.strain_pct:.1f}% strain. Raise the strain toward "
+                f"{mat.eps_tr*100:.1f}% in User Defined Settings, cut the "
+                f"cabinet load, or add a regenerator.")
+    st.markdown(f'<div class="verdict {"" if env["reachable"] else "blocked"}">'
+               f'<h2>{headline}</h2><p>{body}</p></div>', unsafe_allow_html=True)
+
+    for col, cap, value, unit in zip(
+            st.columns(5),
+            ["Adiabatic swing ΔT<sub>ad</sub>", "Ideal single-stage floor",
+             "Sustainable minimum", "Transfer effectiveness",
+             "Steady cooling duty"],
+            [f"{env['dt_adiabatic']:.1f}", f"{cfg.floor_c:.1f}",
+             f"{env['t_min_c']:.1f}", f"{effectiveness*100:.0f}",
+             f"{env['steady_lift_w']:.1f}"],
+            ["K", "°C", "°C", f"% &nbsp;(τ = {tau:.1f} s)", "W"]):
+        with col:
+            st.markdown(f'<div class="cap">{cap}</div><div class="figure">'
+                       f'{value} <small>{unit}</small></div>',
+                       unsafe_allow_html=True)
+
+    if effectiveness < 0.35:
+        st.info(f"Each phase lasts {cfg.phase_time_s:.1f} s against a thermal "
+               f"time constant of {tau:.1f} s, so only "
+               f"{effectiveness*100:.0f}% of the available swing transfers "
+               f"before the phase ends.")
+
+    st.divider()
+
+    c1, c2, c3, c4, c5, c6 = st.columns([1.3, 1.3, 1.3, 1, 1, 1])
+    running = st.session_state.get("running", False)
+    with c1:
+        if state.target_reached:
+            st.button("Holding at target", disabled=True, use_container_width=True)
+        elif running:
+            if st.button("Stop", use_container_width=True):
+                st.session_state.running = False
+                event("Sequencing stopped by operator.")
+                st.rerun()
+        else:
+            label = "Start sequencing" if active["auto_mode"] else "Step one phase"
+            if st.button(label, type="primary", use_container_width=True):
+                if active["auto_mode"]:
+                    st.session_state.running = True
+                    event("Automatic sequencing started.")
+                else:
+                    s = advance_phase()
+                    event(f"Phase {s.phase} — {PHASE_NAMES[s.phase]}.")
+                st.rerun()
+    with c2:
+        if st.button("Run to steady state", use_container_width=True):
+            guard = 0
+            while not st.session_state.state.target_reached and guard < 6000:
+                before = st.session_state.state.t_chamber
+                for _ in range(4):
+                    advance_phase()
+                guard += 4
+                if abs(before - st.session_state.state.t_chamber) < 5e-5:
+                    break
+            st.session_state.running = False
+            event(f"Batch solve finished after "
+                 f"{st.session_state.state.cycle} cycles.")
+            st.rerun()
+    with c3:
+        if st.button("Reset run data", use_container_width=True,
+                     help="Clears run history and cycle count only — your "
+                          "settings and saved runs are untouched."):
+            reset("Run data reset by operator.")
+            st.rerun()
+    with c4:
+        st.markdown(f'<div class="cap">Cycles</div><div class="figure">'
+                   f'{state.cycle}</div>', unsafe_allow_html=True)
+    with c5:
+        st.markdown(f'<div class="cap">Gap to target</div><div class="figure">'
+                   f'{state.t_chamber - cfg.target_c:+.2f} <small>K</small></div>',
+                   unsafe_allow_html=True)
+    with c6:
+        chip = ("hold", "Target hold") if state.target_reached else (
+            ("run", "Sequencing") if running else ("idle", "Idle"))
+        st.markdown(f'<div class="cap">Controller</div><div style="margin-top:8px">'
+                   f'<span class="chip {chip[0]}">{chip[1]}</span></div>',
+                   unsafe_allow_html=True)
+
+    DESCRIPTIONS = {
+        1: "Stress drives the austenite-to-martensite transformation. Latent "
+           "heat appears as a temperature rise in the element.",
+        2: "The hot element is swept by the coolant and returns toward "
+           "ambient while the strain is held.",
+        3: "The stress is released. The reverse transformation absorbs "
+           "latent heat and the element goes below ambient.",
+        4: "The cold element is coupled to the cold box and pulls heat out "
+           "of it. This is the useful cooling.",
+    }
+    cols = st.columns(4)
+    for i in range(1, 5):
+        cls = "active" if state.phase == i else (
+            "done" if state.cycle > 0 or state.phase > i else "")
+        with cols[i - 1]:
+            st.markdown(f'<div class="step {cls}"><div class="n">{i}</div>'
+                       f'<div class="t">{PHASE_NAMES[i]}</div>'
+                       f'<div class="d">{DESCRIPTIONS[i]}</div></div>',
+                       unsafe_allow_html=True)
+    st.write("")
+
+    for col, (cap, value, unit) in zip(st.columns(6), [
+            ("Cold box", f"{state.t_chamber:.2f}", "°C"),
+            ("Element", f"{state.t_element:.2f}", "°C"),
+            ("Coolant", f"{state.t_fluid:.2f}", "°C"),
+            ("Stress", f"{state.stress_mpa:.0f}", "MPa"),
+            ("Cooling duty", f"{state.q_cold_rate:.1f}", "W"),
+            ("COP, run average", f"{avg_cop:.2f}", "")]):
+        with col:
+            st.markdown(f'<div class="cap">{cap}</div><div class="figure">'
+                       f'{value} <small>{unit}</small></div>',
+                       unsafe_allow_html=True)
+
+    for severity, message in check_interlocks(cfg, state):
+        (st.error if severity == "alarm" else st.warning)(message)
+    st.write("")
+
+    st.markdown(f"**Enclosure & wire extremes**  "
+               f"<span style='color:{theme['STEEL']};font-size:12px'>"
+               f"(since last reset)</span>", unsafe_allow_html=True)
+    ex = st.session_state.extremes
+    for col, (cap, value) in zip(st.columns(4), [
+            ("Enclosure — maximum", f"{ex['chamber_max']:.2f} °C"),
+            ("Enclosure — minimum", f"{ex['chamber_min']:.2f} °C"),
+            ("Wire / element — maximum", f"{ex['element_max']:.2f} °C"),
+            ("Wire / element — minimum", f"{ex['element_min']:.2f} °C")]):
+        with col:
+            st.markdown(f'<div class="extreme"><div class="cap">{cap}</div>'
+                       f'<div class="figure" style="font-size:20px">{value}</div>'
+                       f'</div>', unsafe_allow_html=True)
+    st.write("")
+
+    log = st.session_state.log
+    g1, g2 = st.columns([1.55, 1])
+    with g1:
+        st.markdown("**Pull-down**")
+        fig, ax = plt.subplots(figsize=(8.2, 3.5))
+        ax.set_facecolor(theme["PAPER"]); ax.figure.patch.set_facecolor(theme["PAPER"])
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+        for side in ("left", "bottom"):
+            ax.spines[side].set_color(theme["LINE"])
+        ax.tick_params(colors=theme["STEEL"], labelsize=8)
+        ax.grid(True, color=theme["LINE"], linewidth=0.6, alpha=0.7)
+        ax.set_axisbelow(True)
+        t_arr = np.asarray(log["t"])
+        ax.plot(t_arr, log["element"], color=theme["WARM"], lw=1.0, alpha=0.75,
+               label="Element")
+        ax.plot(t_arr, log["chamber"], color=theme["COLD"], lw=2.2, label="Cold box")
+        ax.axhline(cfg.target_c, color=theme["GOOD"], ls="--", lw=1.2, label="Target")
+        ax.axhline(cfg.ambient_c, color=theme["STEEL"], ls=":", lw=1.0, label="Ambient")
+        ax.set_xlabel("Elapsed time (s)", color=theme["STEEL"])
+        ax.set_ylabel("Temperature (°C)", color=theme["STEEL"])
+        leg = ax.legend(frameon=False, fontsize=8, ncols=4, loc="upper right")
+        for text in leg.get_texts():
+            text.set_color(theme["STEEL"])
+        st.pyplot(fig, clear_figure=True); plt.close(fig)
+    with g2:
+        st.markdown("**Stress–strain path**")
+        fig2, ax2 = plt.subplots(figsize=(5.2, 3.5))
+        ax2.set_facecolor(theme["PAPER"]); ax2.figure.patch.set_facecolor(theme["PAPER"])
+        for side in ("top", "right"):
+            ax2.spines[side].set_visible(False)
+        for side in ("left", "bottom"):
+            ax2.spines[side].set_color(theme["LINE"])
+        ax2.tick_params(colors=theme["STEEL"], labelsize=8)
+        ax2.grid(True, color=theme["LINE"], linewidth=0.6, alpha=0.7)
+        ax2.plot(log["strain"][-160:], log["stress"][-160:],
+                color=theme["INK"], lw=1.4, alpha=0.85)
+        ax2.scatter([state.strain_pct], [state.stress_mpa],
+                   s=55, color=theme["WARM"], zorder=5)
+        ax2.set_xlabel("Strain (%)", color=theme["STEEL"])
+        ax2.set_ylabel("Stress (MPa)", color=theme["STEEL"])
+        st.pyplot(fig2, clear_figure=True); plt.close(fig2)
+
+    h1, h2 = st.columns([1.55, 1])
+    with h1:
+        st.markdown("**Coefficient of performance per cycle**")
+        fig3, ax3 = plt.subplots(figsize=(8.2, 2.4))
+        ax3.set_facecolor(theme["PAPER"]); ax3.figure.patch.set_facecolor(theme["PAPER"])
+        for side in ("top", "right"):
+            ax3.spines[side].set_visible(False)
+        for side in ("left", "bottom"):
+            ax3.spines[side].set_color(theme["LINE"])
+        ax3.tick_params(colors=theme["STEEL"], labelsize=8)
+        ax3.grid(True, color=theme["LINE"], linewidth=0.6, alpha=0.7)
+        cyc, cop_arr = np.asarray(log["cycle"]), np.asarray(log["cop"])
+        mask = cyc > 0
+        ax3.plot(cyc[mask], cop_arr[mask], color=theme["COLD"], lw=1.6)
+        ax3.set_xlabel("Cycle", color=theme["STEEL"])
+        ax3.set_ylabel("COP (–)", color=theme["STEEL"])
+        st.pyplot(fig3, clear_figure=True); plt.close(fig3)
+    with h2:
+        st.markdown("**Controller log**")
+        lines = st.session_state.events or ["No events yet."]
+        html_lines = []
+        for ln in lines:
+            if "  " in ln:
+                ts, rest = ln.split("  ", 1)
+                html_lines.append(f'<span class="ts">{ts}</span>&nbsp;&nbsp;{rest}')
+            else:
+                html_lines.append(ln)
+        st.markdown(f'<div class="ctrl-log">{"<br>".join(html_lines)}</div>',
+                   unsafe_allow_html=True)
+
+    if active["auto_mode"] and st.session_state.get("running") and not state.target_reached:
+        for _ in range(active["cycles_per_update"] * 4):
+            if advance_phase().target_reached:
+                break
+        s = st.session_state.state
+        if s.target_reached:
+            st.session_state.running = False
+            event(f"Target {cfg.target_c:.1f} °C reached after {s.cycle} "
+                 f"cycles. Sequencing stopped.")
+            st.toast(f"Target reached in {s.cycle} cycles.", icon="✅")
+        st.rerun()
+
+    # --- results / export --------------------------------------------
+    st.divider()
+    st.markdown("**Test record**")
+    frame = pd.DataFrame({
+        "time_s": log["t"], "cycle": log["cycle"], "chamber_c": log["chamber"],
+        "element_c": log["element"], "coolant_c": log["fluid"],
+        "strain_pct": log["strain"], "stress_mpa": log["stress"],
+        "cop": log["cop"], "cooling_w": log["lift"],
+    })
+
+    def build_report() -> str:
+        rows = [
+            ("User", USER_ID), ("Material", mat.name),
+            ("Element form", f"{cfg.n_elements} × {cfg.form}, {cfg.length_mm:.0f} mm"),
+            ("Cross-section", f"{cfg.section_area*1e6:.1f} mm²"),
+            ("Active mass", f"{cfg.mass*1e3:.1f} g"),
+            ("Heat-transfer area", f"{cfg.wetted_area*1e4:.0f} cm²"),
+            ("Exchanger", cfg.exchanger.name),
+            ("Conductance UA", f"{cfg.ua_hx:.1f} W/K"),
+            ("Thermal time constant", f"{tau:.2f} s"),
+            ("Applied strain", f"{cfg.strain_pct:.2f} %"),
+            ("Regenerator effectiveness", f"{cfg.regen_effectiveness*100:.0f} %"),
+            ("Boundary condition", active["bc_mode"]),
+            ("Fixed end", active["bc_fixed_end"]),
+            ("Displacement direction", _direction_label),
+            ("Displacement magnitude", f"{cfg.strain * cfg.length_mm:.2f} mm"),
+            ("Phase duration", f"{cfg.phase_time_s:.2f} s"),
+            ("Ambient", f"{cfg.ambient_c:.1f} °C"),
+            ("Target", f"{cfg.target_c:.1f} °C"),
+            ("Adiabatic ΔT", f"{env['dt_adiabatic']:.2f} K"),
+            ("Sustainable minimum", f"{env['t_min_c']:.2f} °C"),
+            ("Cycles completed", f"{state.cycle}"),
+            ("Cold box now", f"{state.t_chamber:.2f} °C"),
+            ("Enclosure max / min", f"{ex['chamber_max']:.2f} / {ex['chamber_min']:.2f} °C"),
+            ("Wire max / min", f"{ex['element_max']:.2f} / {ex['element_min']:.2f} °C"),
+            ("Run-average COP", f"{avg_cop:.3f}"),
+            ("Cooling energy delivered", f"{q_tot/1000:.2f} kJ"),
+            ("Work input", f"{w_tot/1000:.2f} kJ"),
+        ]
+        table = "\n".join(f"| {k} | {v} |" for k, v in rows)
+        verdict = "reached" if state.target_reached else "not reached"
+        return (f"# Elastocaloric rig test record\n\nGenerated "
+               f"{datetime.now():%Y-%m-%d %H:%M} for user `{USER_ID}`\n\n"
+               f"## Result\n\nTarget {cfg.target_c:.1f} °C was {verdict} "
+               f"after {state.cycle} cycles. {headline} {body}\n\n"
+               f"## Configuration and values\n\n"
+               f"| Quantity | Value |\n|---|---|\n{table}\n\n## Basis\n\n"
+               f"Two-capacity lumped model with Clausius-Clapeyron "
+               f"transformation stress and an NTU-effectiveness exchanger. "
+               f"Values are simulated, not measured.\n")
+
+    stage1_done = state.cycle > 0 or len(log["t"]) > 1
+    saved = list_saved_runs(USER_ID)
+    stage2_done = len(saved) > 0
+    stage3_done = st.session_state.get("has_downloaded", False)
+
+    def _stage_class(done, active_):
+        return "done" if done else ("active" if active_ else "pending")
+
+    STAGE_INFO = [
+        ("1", "Run a simulation", "Click Start sequencing or Run to steady "
+         "state above."),
+        ("2", "Save it here", "Give this run a name and click Save. It's "
+         "stored to your account and survives a refresh."),
+        ("3", "Download it", "Download the file for any saved run."),
+    ]
+    stage_states = [stage1_done, stage1_done and stage2_done,
+                    stage1_done and stage2_done and stage3_done]
+    scols = st.columns(3)
+    for i, (num, title, desc) in enumerate(STAGE_INFO):
+        act = (not stage_states[i]) and (i == 0 or stage_states[i - 1])
+        cls = _stage_class(stage_states[i], act)
+        with scols[i]:
+            st.markdown(f'<div class="step {cls}"><div class="n">STAGE {num}</div>'
+                       f'<div class="t">{"✓ " if stage_states[i] else ""}{title}</div>'
+                       f'<div class="d">{desc}</div></div>', unsafe_allow_html=True)
+    st.write("")
+
+    if not stage1_done:
+        st.info("Run at least one phase above, then come back here to save it.")
+    else:
+        sv1, sv2 = st.columns([3, 1])
+        with sv1:
+            default_name = (f"{mat.name.split('(')[0].strip()} → "
+                           f"{cfg.target_c:.0f}°C ({datetime.now():%H:%M})")
+            save_name = st.text_input("Name this run", value=default_name,
+                                      key="save_name_input")
+        with sv2:
+            st.write(""); st.write("")
+            do_save = st.button("💾 Save this run", type="primary",
+                                use_container_width=True)
+        if do_save:
+            add_saved_run(USER_ID, save_name or default_name, {
+                "material": mat.name, "target_c": cfg.target_c,
+                "reached": state.target_reached, "cycles": state.cycle,
+                "chamber_c": state.t_chamber, "cop": avg_cop,
+                "csv": frame.to_csv(index=False), "report": build_report(),
+            })
+            event(f'Run saved as "{save_name or default_name}".')
+            st.success(f'Saved as "{save_name or default_name}".')
+            st.rerun()
+
+        if saved:
+            st.markdown(f"**Your saved runs ({len(saved)})**")
+            for run in saved:
+                badge = ("✅ Reached target" if run["reached"]
+                         else "⚠️ Did not reach target")
+                with st.expander(f"{run['name']}  —  {badge}", expanded=False):
+                    rc1, rc2, rc3, rc4 = st.columns(4)
+                    rc1.markdown(f'<div class="cap">Material</div><div class="figure" '
+                               f'style="font-size:16px">{run["material"]}</div>',
+                               unsafe_allow_html=True)
+                    rc2.markdown(f'<div class="cap">Target</div><div class="figure" '
+                               f'style="font-size:16px">{run["target_c"]:.1f} °C</div>',
+                               unsafe_allow_html=True)
+                    rc3.markdown(f'<div class="cap">Cycles</div><div class="figure" '
+                               f'style="font-size:16px">{run["cycles"]}</div>',
+                               unsafe_allow_html=True)
+                    rc4.markdown(f'<div class="cap">COP</div><div class="figure" '
+                               f'style="font-size:16px">{run["cop"]:.2f}</div>',
+                               unsafe_allow_html=True)
+                    st.caption(f"Saved {run['saved_at']}")
+                    dc1, dc2, dc3 = st.columns(3)
+                    with dc1:
+                        if st.download_button("Download CSV",
+                                             run["csv"].encode(),
+                                             f"{run['name'].replace(' ', '_')}.csv",
+                                             "text/csv", key=f"dl_csv_{run['id']}",
+                                             use_container_width=True):
+                            st.session_state.has_downloaded = True
+                    with dc2:
+                        if st.download_button("Download report",
+                                             run["report"].encode(),
+                                             f"{run['name'].replace(' ', '_')}.md",
+                                             "text/markdown", key=f"dl_md_{run['id']}",
+                                             use_container_width=True):
+                            st.session_state.has_downloaded = True
+                    with dc3:
+                        if st.button("🗑 Delete", key=f"del_run_{run['id']}",
+                                    use_container_width=True):
+                            delete_saved_run(USER_ID, run["id"])
+                            event(f'Deleted saved run "{run["name"]}".')
+                            st.rerun()
+            if st.button("🗑 Clear all my saved runs", key="clear_saved"):
+                clear_saved_runs(USER_ID)
+                event("Cleared all saved runs.")
+                st.rerun()
+
+    st.write("")
+    st.caption("Quick download without saving a named copy first:")
+    e1, e2, e3 = st.columns(3)
+    with e1:
+        if st.download_button("Download time series (CSV)",
+                             frame.to_csv(index=False).encode(),
+                             f"ecx_run_{datetime.now():%Y%m%d_%H%M}.csv",
+                             "text/csv", use_container_width=True):
+            st.session_state.has_downloaded = True
+    with e2:
+        if st.download_button("Download test record (Markdown)",
+                             build_report().encode(),
+                             f"ecx_report_{datetime.now():%Y%m%d_%H%M}.md",
+                             "text/markdown", use_container_width=True):
+            st.session_state.has_downloaded = True
+    with e3:
+        buf = io.StringIO(); frame.describe().to_csv(buf)
+        if st.download_button("Download summary statistics (CSV)",
+                             buf.getvalue().encode(), "ecx_summary.csv",
+                             "text/csv", use_container_width=True):
+            st.session_state.has_downloaded = True
+
+    with st.expander("Last 25 logged steps"):
+        st.dataframe(frame.tail(25), use_container_width=True, hide_index=True)
+
+    st.caption("Simulated process values. Experimental validation requires "
+              "measured transformation temperatures, the stress–strain "
+              "hysteresis of the actual element, heat-transfer coefficients, "
+              "thermal masses and actuator losses.")
+
+# -----------------------------------------------------------------
+# TAB 2 — USER DEFINED SETTINGS
+# Detailed editable configuration, data input, file/image input.
+# Everything here writes to "d_*" draft keys only; the dashboard keeps
+# showing the ACTIVE config until "Apply changes" is clicked.
+# -----------------------------------------------------------------
+with tab_settings:
+    d = {k: st.session_state[f"d_{k}"] for k in ACTIVE_DEFAULTS}
+    unsaved = any(d[k] != active.get(k) for k in ACTIVE_DEFAULTS)
+
+    def _top_apply_bar():
+        if unsaved:
+            st.markdown('<div class="unsaved-banner">You have unsaved changes '
+                       "here — the SCADA dashboard is still running your "
+                       "previously applied configuration. Click "
+                       "<b>Apply changes</b> below to activate the draft.</div>",
+                       unsafe_allow_html=True)
+        bcol1, bcol2, bcol3 = st.columns([1.4, 1.4, 3])
+        apply_clicked = bcol1.button("✅ Apply changes", type="primary",
+                                     use_container_width=True,
+                                     disabled=not unsaved, key="apply_top")
+        discard_clicked = bcol2.button("↩ Discard draft", use_container_width=True,
+                                       disabled=not unsaved, key="discard_top")
+        return apply_clicked, discard_clicked
+
+    apply1, discard1 = _top_apply_bar()
+
+    st.markdown("### Operating parameters")
+    oc1, oc2, oc3 = st.columns(3)
+    with oc1:
+        st.selectbox("Active material", list(MATERIALS),
+                    format_func=lambda k: MATERIALS[k].name, key="d_material_key")
+        d_mat = MATERIALS[st.session_state["d_material_key"]]
+        st.number_input("Target temperature (°C)", -40.0, 40.0, step=1.0,
+                        key="d_target_c")
+    with oc2:
+        st.slider("Phase duration (s)", 0.2, 60.0, step=0.1, key="d_phase_time_s")
+        st.number_input("Ambient temperature (°C)", 5.0, 45.0, step=1.0,
+                        key="d_ambient_c")
+    with oc3:
+        st.toggle("Automatic sequencing", key="d_auto_mode")
+        st.slider("Cycles per screen update", 1, 20, key="d_cycles_per_update")
+
+    st.markdown("### Boundary conditions & displacement")
+    st.caption("One end is always Fixed; the opposite end is always "
+              "Displacement-controlled.")
+    bc1, bc2 = st.columns(2)
+    with bc1:
+        st.selectbox("Support configuration",
+                    ["Fixed + Displacement", "User Defined"], key="d_bc_mode")
+        st.radio("Fixed end", ["Left", "Right"], horizontal=True,
+                key="d_bc_fixed_end")
+    with bc2:
+        strain_mn = 0.5
+        strain_mx = max(8.0, d_mat.eps_tr * 100 * 1.3)
+        st.session_state["d_strain_pct"] = min(max(
+            st.session_state["d_strain_pct"], strain_mn), strain_mx)
+        bc_overrides = st.session_state["d_bc_mode"] == "User Defined"
+        st.slider("Applied strain (%)", strain_mn, strain_mx, step=0.1,
+                 key="d_strain_pct", disabled=bc_overrides,
+                 help=(f"Transformation plateau ends near "
+                       f"{d_mat.eps_tr*100:.1f}%."))
+        st.toggle("Compressive loading", key="d_mode_compression",
+                 disabled=bc_overrides)
+    if bc_overrides:
+        st.radio("Displacement direction",
+                ["Tension (elongation)", "Compression (contraction)"],
+                key="d_bc_direction")
+        disp_max = max(0.1, round(st.session_state["d_length_mm"] * 0.10, 2))
+        st.number_input("Displacement magnitude (mm)", 0.05, disp_max, step=0.05,
+                       key="d_bc_disp_mm",
+                       help=f"Bounded to 10% of the active length.")
+
+    st.markdown("### Mechanical configuration")
+    mc1, mc2, mc3 = st.columns(3)
+    with mc1:
+        st.radio("Element form", ["tube", "wire", "custom"], horizontal=True,
+                key="d_form")
+        st.number_input("Elements in bundle", 1, 40, step=1, key="d_n_elements")
+    with mc2:
+        st.number_input("Active length (mm)", 20.0, 500.0, step=5.0,
+                       key="d_length_mm")
+        if st.session_state["d_form"] == "custom":
+            st.number_input("Cross-section area, per element (mm²)", 0.5, 500.0,
+                           step=1.0, key="d_custom_area_mm2")
+        else:
+            st.number_input("Outer diameter (mm)", 0.5, 30.0, step=0.5, key="d_od_mm")
+    with mc3:
+        if st.session_state["d_form"] == "custom":
+            st.number_input("Wetted perimeter, per element (mm)", 0.5, 200.0,
+                           step=1.0, key="d_custom_perimeter_mm")
+        else:
+            st.number_input("Bore diameter (mm)", 0.1, 29.0, step=0.5,
+                           disabled=(st.session_state["d_form"] == "wire"),
+                           key="d_id_mm")
+        st.slider("Actuator efficiency", 0.3, 0.95, step=0.05, key="d_actuator_efficiency")
+
+    st.markdown("### Heat transfer & enclosure")
+    hc1_, hc2_, hc3_ = st.columns(3)
+    with hc1_:
+        st.selectbox("Exchanger", list(EXCHANGERS),
+                    format_func=lambda k: EXCHANGERS[k].name, key="d_exchanger_key")
+        st.slider("Coolant flow (CFM equivalent)", 10.0, 150.0, step=5.0,
+                 key="d_flow_cfm")
+    with hc2_:
+        st.number_input("Chamber heat capacity (J/K)", 50.0, 20000.0, step=50.0,
+                       key="d_chamber_capacity")
+        st.number_input("Cabinet loss (W/K)", 0.05, 5.0, step=0.05,
+                       key="d_insulation_ua")
+    with hc3_:
+        st.slider("Regenerator effectiveness", 0.0, 0.8, step=0.05,
+                 key="d_regen_effectiveness",
+                 help="0 = no regenerator. Recycling heat between the hot "
+                      "and cold halves lets the machine pump across a span "
+                      "larger than one element's own adiabatic swing.")
+
+    st.markdown("### Material / research data")
+    st.text_area("Material notes / user-defined properties / experimental "
+                "parameters", key="d_material_notes", height=90,
+                placeholder="e.g. measured Af/As/Ms/Mf, batch number, "
+                            "vendor datasheet deviations…")
+
+    st.markdown("### Data input — numerical / sensor / experimental measurements")
+    st.text_area("Free-form numerical or experimental data", key="d_experimental_notes",
+                height=110,
+                placeholder="Paste sensor readings, measured stress-strain "
+                            "points, lab notes, etc. Saved with your account "
+                            "on Apply.")
+
+    apply2, discard2 = False, False
+    st.markdown("### ")
+    apply2, discard2 = _top_apply_bar()
+
+    if discard1 or discard2:
+        st.session_state["_pending_settings"] = dict(active)
+        st.rerun()
+
+    if apply1 or apply2:
+        new_active = dict(active)
+        for k in ACTIVE_DEFAULTS:
+            src_key = {"material_key": "d_material_key",
+                      "exchanger_key": "d_exchanger_key"}.get(k, f"d_{k}")
+            if src_key in st.session_state:
+                new_active[k] = st.session_state[src_key]
+        errs = validate_settings(new_active)
+        if errs:
+            for e_ in errs:
+                st.error(e_)
+        else:
+            st.session_state["_pending_apply_active"] = new_active
+            st.session_state["_pending_apply_reason"] = (
+                "Settings applied — run data reset to start cleanly under "
+                "the new configuration.")
+            event_msg_holder = new_active
+            st.success("Configuration validated and applied.")
+            st.rerun()
+
+    st.divider()
+    st.markdown("### File / image input")
+    st.caption("CSV, Excel, PDF, TXT and image files. Stored to your account "
+              "only — other users cannot see or list them.")
+    uploads = st.file_uploader(
+        "Upload research or experimental files", accept_multiple_files=True,
+        type=["csv", "xlsx", "xls", "pdf", "txt", "png", "jpg", "jpeg"],
+        key="settings_uploader")
+    if uploads:
+        note = st.text_input("Optional note for these files", key="upload_note")
+        if st.button("💾 Save uploaded files to my account"):
+            for uf in uploads:
+                add_user_file(USER_ID, uf.name, uf.type or "application/octet-stream",
+                             uf.getvalue(), note)
+            event(f"{len(uploads)} file(s) uploaded.")
+            st.success(f"Saved {len(uploads)} file(s).")
+            st.rerun()
+
+    files = list_user_files(USER_ID)
+    if files:
+        st.markdown(f"**Your files ({len(files)})**")
+        for fid, fname, mime, note, uploaded_at, size in files:
+            fc1, fc2, fc3 = st.columns([3, 1, 1])
+            fc1.write(f"📄 **{fname}**  ·  {size/1024:.1f} KB  ·  {uploaded_at[:16]}"
+                     + (f"  ·  _{note}_" if note else ""))
+            with fc2:
+                row = get_user_file(USER_ID, fid)
+                if row:
+                    _, mime_, content_ = row
+                    st.download_button("Download", content_, fname, mime_,
+                                      key=f"dlf_{fid}", use_container_width=True)
+            with fc3:
+                if st.button("🗑 Delete", key=f"delf_{fid}", use_container_width=True):
+                    delete_user_file(USER_ID, fid)
+                    event(f'Deleted file "{fname}".')
+                    st.rerun()
+    else:
+        st.caption("No files uploaded yet.")
+
+    st.divider()
+    st.markdown("### Reset")
+    rc1, rc2 = st.columns(2)
+    with rc1:
+        st.caption("Restores every draft field here to factory defaults. "
+                  "Nothing becomes active until you click Apply.")
+        if st.button("↺ Restore factory defaults (draft only)"):
+            st.session_state["_pending_settings"] = dict(ACTIVE_DEFAULTS)
+            st.rerun()
+    with rc2:
+        st.caption("⚠️ Permanently deletes your saved cloud configuration, "
+                  "saved runs and uploaded files. Cannot be undone.")
+        confirm = st.checkbox("I understand this is permanent", key="confirm_wipe")
+        if st.button("🗑 Clear my saved cloud settings", disabled=not confirm,
+                     type="primary"):
+            delete_active_config(USER_ID)
+            clear_saved_runs(USER_ID)
+            for fid, *_ in list_user_files(USER_ID):
+                delete_user_file(USER_ID, fid)
+            fresh = dict(ACTIVE_DEFAULTS)
+            st.session_state["_pending_apply_active"] = fresh
+            st.session_state["_pending_apply_reason"] = (
+                "Cloud settings, saved runs and files cleared.")
+            st.session_state["_pending_settings"] = fresh
+            st.session_state["confirm_wipe"] = False
+            st.rerun()
+
+# -----------------------------------------------------------------
+# TAB 3 — AI ENGINEERING ASSISTANT
+# -----------------------------------------------------------------
+with tab_ai:
     st.caption(
-        "Rule-based — reads this app's own physics engine and live state "
-        "directly, so it can't invent a wrong number, but it also can't "
-        "hold a free-form conversation or read an uploaded file/image "
+        "Rule-based — reads this app's own physics engine and your live "
+        "state directly, so it can't invent a wrong number, but it also "
+        "can't hold a free-form conversation or read an uploaded file/image "
         "(that needs a connected AI model, which this deployment doesn't "
-        "have configured)."
-    )
+        "have configured). Your recommendation history below is saved to "
+        "your account.")
 
     st.markdown("#### Beginner mode — what does this do?")
     GLOSSARY = {
         "Phase duration": lambda: (
-            f"How long each of the four steps (load, reject heat, unload, "
-            f"absorb heat) runs before moving to the next. Right now it's "
-            f"**{cfg.phase_time_s:.1f} s**. Your element's own thermal time "
-            f"constant is **{tau:.1f} s**, so at the current setting only "
-            f"about **{effectiveness*100:.0f}%** of the available "
-            f"temperature swing is transferred each phase — shorter phases "
-            f"run more cycles per minute but move less heat each time; "
-            f"longer phases move more heat per cycle but pull down slower "
-            f"in wall-clock time."),
+            f"How long each of the four steps runs before moving to the "
+            f"next. Right now it's **{cfg.phase_time_s:.1f} s** against a "
+            f"thermal time constant of **{tau:.1f} s**, so about "
+            f"**{effectiveness*100:.0f}%** of the available swing transfers "
+            f"each phase."),
         "Applied strain / displacement": lambda: (
-            f"How far the element is mechanically stretched or compressed. "
-            f"Right now that's **{effective_strain_pct:.2f}%** strain, "
-            f"which is **{cfg.strain * cfg.length_mm:.2f} mm** of "
-            f"displacement on a {cfg.length_mm:.0f} mm element. This "
-            f"directly sets the adiabatic temperature swing "
-            f"(**{env['dt_adiabatic']:.1f} K** at present) — more strain "
-            f"means more cooling per cycle, up to the material's "
-            f"transformation plateau at {mat.eps_tr*100:.1f}%; beyond "
-            f"that you get no extra cooling, only extra stress."),
+            f"Right now that's **{cfg.strain_pct:.2f}%** strain "
+            f"(**{cfg.strain * cfg.length_mm:.2f} mm** on a "
+            f"{cfg.length_mm:.0f} mm element), giving an adiabatic swing of "
+            f"**{env['dt_adiabatic']:.1f} K**. The plateau is at "
+            f"{mat.eps_tr*100:.1f}%; more strain beyond that adds stress, "
+            f"not cooling."),
         "Fixed / Displacement ends": lambda: (
-            f"One end of the element must stay still (**Fixed: "
-            f"{bc_fixed_end}**) so the mechanical stroke has something to "
-            f"push or pull against; the opposite end "
-            f"(**Displacement: {bc_other_end}**) is the one actually "
-            f"moved to strain the material. Without a fixed reference "
-            f"end, 'displacement' wouldn't mean anything — both ends "
-            f"would just move together."),
+            f"One end (**Fixed: {active['bc_fixed_end']}**) stays still so "
+            f"the mechanical stroke has something to push or pull against; "
+            f"the opposite end is the Displacement end."),
         "Target temperature": lambda: (
-            f"The chamber temperature the controller is trying to reach — "
-            f"currently **{cfg.target_c:.1f} °C**, against an ambient of "
-            f"**{cfg.ambient_c:.1f} °C**. The verdict banner above tells "
-            f"you directly whether this configuration can physically "
-            f"reach it, and if not, by how much it falls short."),
+            f"Currently **{cfg.target_c:.1f} °C** against ambient "
+            f"**{cfg.ambient_c:.1f} °C**. The verdict banner on the "
+            f"Dashboard tab says whether this configuration can reach it."),
         "Exchanger": lambda: (
-            f"How heat actually moves between the element and its "
-            f"surroundings — currently **{EXCHANGERS[hx_key].name}**, "
-            f"giving a conductance of **{cfg.ua_hx:.1f} W/K**. Higher "
-            f"conductance pulls down faster but also lets the element "
-            f"return closer to ambient each cycle, which raises the "
-            f"floor temperature it can ultimately sustain."),
+            f"Currently **{cfg.exchanger.name}**, giving a conductance of "
+            f"**{cfg.ua_hx:.1f} W/K**. Higher conductance pulls down faster "
+            f"but also raises the sustainable floor temperature."),
         "Regenerator effectiveness": lambda: (
-            f"Recycles heat between the hot and cold halves of the cycle "
-            f"so the machine can pump across a span larger than one "
-            f"element's own adiabatic swing. Currently set to "
-            f"**{cfg.regen_effectiveness*100:.0f}%**"
-            + (", i.e. off — a single element with no heat recycling."
-               if cfg.regen_effectiveness == 0 else
+            f"Currently **{cfg.regen_effectiveness*100:.0f}%**"
+            + (", i.e. off." if cfg.regen_effectiveness == 0 else
                f", multiplying the effective swing by "
                f"×{cfg.regen_gain:.2f}.")),
         "COP (coefficient of performance)": lambda: (
-            f"Cooling energy delivered divided by work put in. Right now "
-            f"the run-average is **{avg_cop:.2f}** — below 1 is normal "
-            f"for a single-stage, non-regenerative elastocaloric cycle "
-            f"like this one; refrigerators you buy are usually 2-4 "
-            f"because they're highly optimized multi-stage systems."),
-        "Why a graph/number looks wrong": lambda: (
-            "Most often this means the configuration genuinely can't do "
-            "what's being asked of it — check the verdict banner near the "
-            "top first. If chamber temperature is flat, either the target "
-            "was already reached (see the green banner) or the machine "
-            "hit its physical floor (see 'Sustainable minimum' in the key "
-            "figures row)."),
+            f"Run-average is **{avg_cop:.2f}**. Below 1 is normal for a "
+            f"single-stage, non-regenerative elastocaloric cycle."),
     }
-    glossary_pick = st.selectbox(
-        "Pick a control or concept to have it explained using your "
-        "current numbers:", list(GLOSSARY), key="ai_glossary_pick")
+    glossary_pick = st.selectbox("Pick a concept to have it explained with "
+                                 "your current numbers:", list(GLOSSARY),
+                                 key="ai_glossary_pick")
     st.info(GLOSSARY[glossary_pick]())
 
     st.divider()
     st.markdown("#### Recommend settings for a target")
-    st.markdown(
-        "Tell me the material and the temperature you're trying to reach. "
-        "I'll search for settings that can actually get there, show you the "
-        "values in plain terms, and ask before changing anything."
-    )
     ae1, ae2, ae3 = st.columns(3)
     with ae1:
-        ae_material = st.selectbox(
-            "Material", list(MATERIALS),
-            format_func=lambda k: MATERIALS[k].name, key="ae_material")
+        ae_material = st.selectbox("Material", list(MATERIALS),
+                                   format_func=lambda k: MATERIALS[k].name,
+                                   key="ae_material")
     with ae2:
-        ae_target = st.number_input(
-            "Temperature you want (°C)", -40.0, 40.0, 5.0, 1.0, key="ae_target")
+        ae_target = st.number_input("Temperature you want (°C)", -40.0, 40.0,
+                                    5.0, 1.0, key="ae_target")
     with ae3:
-        ae_ambient = st.number_input(
-            "Room temperature (°C)", 5.0, 45.0, 25.0, 1.0, key="ae_ambient")
-
-    ae_priority = st.radio(
-        "What matters more to you?",
-        ["Reach it fast", "Best efficiency (COP)"],
-        horizontal=True, key="ae_priority")
+        ae_ambient = st.number_input("Room temperature (°C)", 5.0, 45.0,
+                                     25.0, 1.0, key="ae_ambient")
+    ae_priority = st.radio("What matters more to you?",
+                          ["Reach it fast", "Best efficiency (COP)"],
+                          horizontal=True, key="ae_priority")
 
     if st.button("Get recommendation", key="ae_go"):
-        st.session_state["ae_results"] = search_recommendation(
+        results = search_recommendation(
             cfg, ae_material, ae_target, ae_ambient,
             prefer_speed=(ae_priority == "Reach it fast"))
+        st.session_state["ae_results"] = [
+            (config_to_dict(c), e) for c, e in results]
         st.session_state["ae_ran"] = True
+        ctx = st.session_state["ai_ctx"]
+        ctx.setdefault("history", []).insert(0, {
+            "at": datetime.now().isoformat(), "material": ae_material,
+            "target_c": ae_target, "ambient_c": ae_ambient,
+            "priority": ae_priority, "found": len(results) > 0})
+        ctx["history"] = ctx["history"][:20]
+        st.session_state["ai_ctx"] = ctx
+        save_ai_context(USER_ID, ctx)
 
     if st.session_state.get("ae_ran"):
         results = st.session_state.get("ae_results", [])
         if not results:
-            st.error(
-                f"With {MATERIALS[ae_material].name} and your current rig "
-                f"size, I can't find settings that hold {ae_target:.1f} °C. "
-                f"Try a warmer target, or a material with a bigger "
-                f"transformation swing, such as NiTi."
-            )
+            st.error(f"With {MATERIALS[ae_material].name} and your current "
+                    f"rig size, I can't find settings that hold "
+                    f"{ae_target:.1f} °C. Try a warmer target or a material "
+                    f"with a bigger transformation swing, such as NiTi.")
         else:
-            best_c, best_e = results[0]
+            best_dict, best_e = results[0]
+            best_c = dict_to_config(best_dict)
             mo = best_c.material
             st.success(f"Recommended setup — {mo.name}")
             st.markdown(
                 f"- **Applied strain:** {best_c.strain_pct:.1f} %\n"
                 f"- **Phase duration:** {best_c.phase_time_s:.1f} s\n"
-                f"- **Exchanger:** {EXCHANGERS[best_c.exchanger_key].name}\n"
+                f"- **Exchanger:** {best_c.exchanger.name}\n"
                 f"- **Expected result:** reaches {best_c.target_c:.1f} °C in "
                 f"about {best_e['cycles_to_target']:.0f} cycles "
-                f"(~{best_e['time_to_target_s']/60:.1f} min), run-average COP "
-                f"around {best_e['steady_cop']:.2f}.\n\n"
-                f"Type these into the sidebar yourself, or let me set them "
-                f"for you."
-            )
+                f"(~{best_e['time_to_target_s']/60:.1f} min), run-average "
+                f"COP around {best_e['steady_cop']:.2f}.")
             aa1, aa2 = st.columns(2)
             with aa1:
                 if st.button("✅ Yes, apply automatically", key="ae_apply",
                              type="primary", use_container_width=True):
-                    st.session_state["_pending_apply"] = {
-                        "w_material": best_c.material_key,
-                        "w_strain": best_c.strain_pct,
-                        "w_phase_time": best_c.phase_time_s,
-                        "w_hx": best_c.exchanger_key,
-                        "w_ambient": best_c.ambient_c,
-                        "w_target": best_c.target_c,
-                    }
+                    new_active = dict(active)
+                    new_active.update({
+                        "material_key": best_c.material_key,
+                        "strain_pct": best_c.strain_pct,
+                        "phase_time_s": best_c.phase_time_s,
+                        "exchanger_key": best_c.exchanger_key,
+                        "ambient_c": best_c.ambient_c,
+                        "target_c": best_c.target_c,
+                        "bc_mode": "Fixed + Displacement",
+                        "mode_compression": False,
+                    })
+                    st.session_state["_pending_apply_active"] = new_active
+                    st.session_state["_pending_apply_reason"] = (
+                        "Settings applied automatically by the AI "
+                        "Engineering Assistant.")
+                    st.session_state["_pending_settings"] = new_active
                     st.session_state["ae_ran"] = False
-                    st.session_state["_pending_full_reset"] = True
-                    event("Settings applied automatically by the material "
-                          "expert.")
                     st.rerun()
             with aa2:
                 if st.button("No, I'll set it myself", key="ae_skip",
                              use_container_width=True):
-                    st.info("No problem — use the values listed above.")
+                    st.info("No problem — use User Defined Settings to "
+                           "enter these values yourself.")
 
-
-if env["reachable"]:
-    headline = f"This configuration can hold {cfg.target_c:.1f} °C."
-    body = (f"Predicted pull-down takes {env['cycles_to_target']:.0f} cycles "
-            f"({env['time_to_target_s']/60:.1f} min). The lowest temperature "
-            f"the cold box can sustain is {env['t_min_c']:.1f} °C, so there is "
-            f"{cfg.target_c - env['t_min_c']:.1f} K of margin against the "
-            f"{cfg.insulation_ua:.2f} W/K cabinet load.")
-else:
-    headline = f"This configuration cannot reach {cfg.target_c:.1f} °C."
-    body = (f"The cold box settles at {env['t_min_c']:.1f} °C, "
-            f"{abs(cfg.target_c - env['t_min_c']):.1f} K short. The adiabatic "
-            f"swing is only {env['dt_adiabatic']:.1f} K at "
-            f"{cfg.strain_pct:.1f}% strain, and a single-stage cycle without "
-            f"regeneration cannot pump much past it. Raise the strain toward "
-            f"{mat.eps_tr*100:.1f}%, cut the cabinet load, or add a "
-            f"regenerator or a second stage.")
-
-st.markdown(f'<div class="verdict {"" if env["reachable"] else "blocked"}">'
-            f'<h2>{headline}</h2><p>{body}</p></div>', unsafe_allow_html=True)
-
-for col, cap, value, unit in zip(
-        st.columns(5),
-        ["Adiabatic swing ΔT<sub>ad</sub>", "Ideal single-stage floor",
-         "Sustainable minimum", "Transfer effectiveness",
-         "Steady cooling duty"],
-        [f"{env['dt_adiabatic']:.1f}", f"{cfg.floor_c:.1f}",
-         f"{env['t_min_c']:.1f}", f"{effectiveness*100:.0f}",
-         f"{env['steady_lift_w']:.1f}"],
-        ["K", "°C", "°C", f"% &nbsp;(τ = {tau:.1f} s)", "W"]):
-    with col:
-        st.markdown(f'<div class="cap">{cap}</div><div class="figure">'
-                    f'{value} <small>{unit}</small></div>',
-                    unsafe_allow_html=True)
-
-if effectiveness < 0.35:
-    st.info(f"Each phase lasts {cfg.phase_time_s:.1f} s against a thermal time "
-            f"constant of {tau:.1f} s, so only {effectiveness*100:.0f}% of the "
-            "available temperature swing is transferred before the phase ends. "
-            "Longer phases or a higher-conductance exchanger raise the "
-            "coefficient of performance, at the cost of pull-down speed.")
-
-st.divider()
-
-# --- controls -----------------------------------------------------
-c1, c2, c3, c4, c5, c6 = st.columns([1.3, 1.3, 1.3, 1, 1, 1])
-running = st.session_state.get("running", False)
-
-with c1:
-    if state.target_reached:
-        st.button("Holding at target", disabled=True, use_container_width=True)
-    elif running:
-        if st.button("Stop", use_container_width=True):
-            st.session_state.running = False
-            event("Sequencing stopped by operator.")
-            st.rerun()
-    else:
-        label = "Start sequencing" if auto_mode else "Step one phase"
-        if st.button(label, type="primary", use_container_width=True):
-            if auto_mode:
-                st.session_state.running = True
-                event("Automatic sequencing started.")
-            else:
-                s = advance_phase()
-                event(f"Phase {s.phase} — {PHASE_NAMES[s.phase]}.")
-            st.rerun()
-
-with c2:
-    if st.button("Run to steady state", use_container_width=True,
-                 help="Solve forward until the chamber stops changing."):
-        guard = 0
-        while not st.session_state.state.target_reached and guard < 6000:
-            before = st.session_state.state.t_chamber
-            for _ in range(4):
-                advance_phase()
-            guard += 4
-            if abs(before - st.session_state.state.t_chamber) < 5e-5:
-                break
-        st.session_state.running = False
-        event(f"Batch solve finished after "
-              f"{st.session_state.state.cycle} cycles.")
-        st.rerun()
-
-with c3:
-    if st.button("Reset run data", use_container_width=True,
-                 help="Clears the run history and cycle count but keeps "
-                      "your material and rig settings."):
-        reset("Run data reset by operator.")
-        st.rerun()
-
-with c4:
-    st.markdown(f'<div class="cap">Cycles</div>'
-                f'<div class="figure">{state.cycle}</div>',
-                unsafe_allow_html=True)
-with c5:
-    st.markdown(f'<div class="cap">Gap to target</div><div class="figure">'
-                f'{state.t_chamber - cfg.target_c:+.2f} <small>K</small></div>',
-                unsafe_allow_html=True)
-with c6:
-    chip = ("hold", "Target hold") if state.target_reached else (
-        ("run", "Sequencing") if running else ("idle", "Idle"))
-    st.markdown(f'<div class="cap">Controller</div><div style="margin-top:8px">'
-                f'<span class="chip {chip[0]}">{chip[1]}</span></div>',
-                unsafe_allow_html=True)
-
-# --- the four-step sequence ---------------------------------------
-DESCRIPTIONS = {
-    1: "Stress drives the austenite-to-martensite transformation. Latent heat "
-       "appears as a temperature rise in the element.",
-    2: "The hot element is swept by the coolant and returns toward ambient "
-       "while the strain is held.",
-    3: "The stress is released. The reverse transformation absorbs latent heat "
-       "and the element goes below ambient.",
-    4: "The cold element is coupled to the cold box and pulls heat out of it. "
-       "This is the useful cooling.",
-}
-
-cols = st.columns(4)
-for i in range(1, 5):
-    cls = "active" if state.phase == i else (
-        "done" if state.cycle > 0 or state.phase > i else "")
-    with cols[i - 1]:
-        st.markdown(f'<div class="step {cls}"><div class="n">{i}</div>'
-                    f'<div class="t">{PHASE_NAMES[i]}</div>'
-                    f'<div class="d">{DESCRIPTIONS[i]}</div></div>',
-                    unsafe_allow_html=True)
-st.write("")
-
-# --- live readouts -------------------------------------------------
-for col, (cap, value, unit) in zip(st.columns(6), [
-        ("Cold box", f"{state.t_chamber:.2f}", "°C"),
-        ("Element", f"{state.t_element:.2f}", "°C"),
-        ("Coolant", f"{state.t_fluid:.2f}", "°C"),
-        ("Stress", f"{state.stress_mpa:.0f}", "MPa"),
-        ("Cooling duty", f"{state.q_cold_rate:.1f}", "W"),
-        ("COP, run average", f"{avg_cop:.2f}", "")]):
-    with col:
-        st.markdown(f'<div class="cap">{cap}</div><div class="figure">'
-                    f'{value} <small>{unit}</small></div>',
-                    unsafe_allow_html=True)
-
-for severity, message in check_interlocks(cfg, state):
-    (st.error if severity == "alarm" else st.warning)(message)
-
-st.write("")
-
-# --- enclosure & wire (element) extremes ---------------------------
-st.markdown("**Enclosure & wire extremes**  "
-            "<span style='color:%s;font-size:12px'>(since last reset)</span>"
-            % theme["STEEL"], unsafe_allow_html=True)
-
-ex = st.session_state.extremes
-for col, (cap, value) in zip(st.columns(4), [
-        ("Enclosure — maximum", f"{ex['chamber_max']:.2f} °C"),
-        ("Enclosure — minimum", f"{ex['chamber_min']:.2f} °C"),
-        ("Wire / element — maximum", f"{ex['element_max']:.2f} °C"),
-        ("Wire / element — minimum", f"{ex['element_min']:.2f} °C")]):
-    with col:
-        st.markdown(f'<div class="extreme"><div class="cap">{cap}</div>'
-                    f'<div class="figure" style="font-size:20px">{value}</div>'
-                    f'</div>', unsafe_allow_html=True)
-
-st.write("")
-
-# --- trends ---------------------------------------------------------
-log = st.session_state.log
-g1, g2 = st.columns([1.55, 1])
-
-with g1:
-    st.markdown("**Pull-down**")
-    fig, ax = plt.subplots(figsize=(8.2, 3.5))
-    style_axes(ax, theme)
-    t = np.asarray(log["t"])
-    ax.plot(t, log["element"], color=theme["WARM"], lw=1.0, alpha=0.75,
-            label="Element")
-    ax.plot(t, log["chamber"], color=theme["COLD"], lw=2.2, label="Cold box")
-    ax.axhline(cfg.target_c, color=theme["GOOD"], ls="--", lw=1.2,
-              label="Target")
-    ax.axhline(cfg.ambient_c, color=theme["STEEL"], ls=":", lw=1.0,
-              label="Ambient")
-    ax.set_xlabel("Elapsed time (s)"); ax.set_ylabel("Temperature (°C)")
-    leg = ax.legend(frameon=False, fontsize=8, ncols=4, loc="upper right")
-    for text in leg.get_texts():
-        text.set_color(theme["STEEL"])
-    st.pyplot(fig, clear_figure=True); plt.close(fig)
-
-with g2:
-    st.markdown("**Stress–strain path**")
-    fig2, ax2 = plt.subplots(figsize=(5.2, 3.5))
-    style_axes(ax2, theme)
-    ax2.plot(log["strain"][-160:], log["stress"][-160:],
-             color=theme["INK"], lw=1.4, alpha=0.85)
-    ax2.scatter([state.strain_pct], [state.stress_mpa],
-                s=55, color=theme["WARM"], zorder=5)
-    ax2.set_xlabel("Strain (%)"); ax2.set_ylabel("Stress (MPa)")
-    st.pyplot(fig2, clear_figure=True); plt.close(fig2)
-
-h1, h2 = st.columns([1.55, 1])
-with h1:
-    st.markdown("**Coefficient of performance per cycle**")
-    fig3, ax3 = plt.subplots(figsize=(8.2, 2.4))
-    style_axes(ax3, theme)
-    cyc, cop = np.asarray(log["cycle"]), np.asarray(log["cop"])
-    mask = cyc > 0
-    ax3.plot(cyc[mask], cop[mask], color=theme["COLD"], lw=1.6)
-    ax3.set_xlabel("Cycle"); ax3.set_ylabel("COP (–)")
-    st.pyplot(fig3, clear_figure=True); plt.close(fig3)
-
-with h2:
-    st.markdown("**Controller log**")
-    _log_lines = st.session_state.events or ["No events yet."]
-    _log_html = "<br>".join(
-        f'<span style="color:{theme["STEEL"]}">{ln.split("  ", 1)[0]}</span>'
-        f'&nbsp;&nbsp;{ln.split("  ", 1)[1] if "  " in ln else ln}'
-        if "  " in ln else ln
-        for ln in _log_lines
-    )
-    st.markdown(
-        f'<div style="background:{theme["PAPER"]};border:1px solid '
-        f'{theme["LINE"]};border-radius:6px;padding:12px 14px;'
-        f'max-height:220px;overflow-y:auto;font-family:\'IBM Plex Mono\','
-        f'monospace;font-size:12px;line-height:1.7;color:{theme["INK"]}">'
-        f'{_log_html}</div>',
-        unsafe_allow_html=True)
-
-# --- automatic sequencer: one screen update per N cycles ------------
-if auto_mode and st.session_state.get("running") and not state.target_reached:
-    for _ in range(cycles_per_update * 4):
-        if advance_phase().target_reached:
-            break
-    s = st.session_state.state
-    if s.target_reached:
-        st.session_state.running = False
-        event(f"Target {cfg.target_c:.1f} °C reached after {s.cycle} cycles. "
-              f"Sequencing stopped.")
-        st.toast(f"Target reached in {s.cycle} cycles.", icon="✅")
-    st.rerun()
-
-# --- record and export ----------------------------------------------
-st.divider()
-st.markdown("**Test record**")
-
-frame = pd.DataFrame({
-    "time_s": log["t"], "cycle": log["cycle"], "chamber_c": log["chamber"],
-    "element_c": log["element"], "coolant_c": log["fluid"],
-    "strain_pct": log["strain"], "stress_mpa": log["stress"],
-    "cop": log["cop"], "cooling_w": log["lift"],
-})
-
-
-def build_report(rows_extra=None) -> str:
-    rows = [
-        ("Material", mat.name),
-        ("Element form", f"{cfg.n_elements} × {cfg.form}, {cfg.length_mm:.0f} mm"),
-        ("Cross-section", f"{cfg.section_area*1e6:.1f} mm²"),
-        ("Active mass", f"{cfg.mass*1e3:.1f} g"),
-        ("Heat-transfer area", f"{cfg.wetted_area*1e4:.0f} cm²"),
-        ("Exchanger", EXCHANGERS[hx_key].name),
-        ("Conductance UA", f"{cfg.ua_hx:.1f} W/K"),
-        ("Thermal time constant", f"{tau:.2f} s"),
-        ("Applied strain", f"{cfg.strain_pct:.2f} %"),
-        ("Regenerator effectiveness", f"{cfg.regen_effectiveness*100:.0f} %"),
-        ("Boundary condition", f"{bc_mode}"),
-        ("Fixed end", f"{bc_fixed_end}"),
-        ("Displacement end", f"{bc_other_end}"),
-        ("Displacement direction",
-         "Compression" if effective_compression else "Tension"),
-        ("Displacement magnitude",
-         f"{cfg.strain * cfg.length_mm:.2f} mm"),
-        ("Phase duration", f"{cfg.phase_time_s:.2f} s"),
-        ("Ambient", f"{cfg.ambient_c:.1f} °C"),
-        ("Target", f"{cfg.target_c:.1f} °C"),
-        ("Adiabatic ΔT", f"{env['dt_adiabatic']:.2f} K"),
-        ("Sustainable minimum", f"{env['t_min_c']:.2f} °C"),
-        ("Cycles completed", f"{state.cycle}"),
-        ("Cold box now", f"{state.t_chamber:.2f} °C"),
-        ("Enclosure max / min", f"{ex['chamber_max']:.2f} / {ex['chamber_min']:.2f} °C"),
-        ("Wire max / min", f"{ex['element_max']:.2f} / {ex['element_min']:.2f} °C"),
-        ("Run-average COP", f"{avg_cop:.3f}"),
-        ("Cooling energy delivered", f"{q_tot/1000:.2f} kJ"),
-        ("Work input", f"{w_tot/1000:.2f} kJ"),
-    ]
-    table = "\n".join(f"| {k} | {v} |" for k, v in rows)
-    verdict = "reached" if state.target_reached else "not reached"
-    return (f"# Elastocaloric rig test record\n\nGenerated "
-            f"{datetime.now():%Y-%m-%d %H:%M}\n\n## Result\n\nTarget "
-            f"{cfg.target_c:.1f} °C was {verdict} after {state.cycle} cycles. "
-            f"{headline} {body}\n\n## Configuration and values\n\n"
-            f"| Quantity | Value |\n|---|---|\n{table}\n\n## Basis\n\n"
-            f"Two-capacity lumped model with Clausius-Clapeyron transformation "
-            f"stress and an NTU-effectiveness exchanger. Values are simulated, "
-            f"not measured.\n")
-
-
-# ---------------------------------------------------------------------
-# SAVE PANEL — a plain-language stage bar so it's obvious what to do
-# and where you stand: simulate it, save it here, then download it to
-# your own device (the only step that actually leaves a permanent copy
-# on your computer — everything before that lives only in this browser
-# tab and disappears if you close it).
-# ---------------------------------------------------------------------
-st.markdown("### 💾 Save your results")
-
-stage1_done = state.cycle > 0 or len(log["t"]) > 1
-stage2_done = len(st.session_state.saved_runs) > 0
-stage3_done = st.session_state.has_downloaded
-
-def _stage_class(done, active):
-    if done:
-        return "done"
-    if active:
-        return "active"
-    return "pending"
-
-STAGE_INFO = [
-    ("1", "Run a simulation", "Click Start sequencing or Run to steady "
-     "state above, on any target — reaching it isn't required."),
-    ("2", "Save it here", "Give this run a name and click Save. It "
-     "joins a list below, right on this screen."),
-    ("3", "Download it", "Download the file for any saved run. This is "
-     "the step that actually puts a copy on your device — the saved "
-     "list disappears if you close this browser tab."),
-]
-stage_states = [
-    stage1_done,
-    stage1_done and stage2_done,
-    stage1_done and stage2_done and stage3_done,
-]
-scols = st.columns(3)
-for i, (num, title, desc) in enumerate(STAGE_INFO):
-    active = (not stage_states[i]) and (i == 0 or stage_states[i - 1])
-    cls = _stage_class(stage_states[i], active)
-    with scols[i]:
-        st.markdown(
-            f'<div class="step {cls}"><div class="n">STAGE {num}</div>'
-            f'<div class="t">{"✓ " if stage_states[i] else ""}{title}</div>'
-            f'<div class="d">{desc}</div></div>',
-            unsafe_allow_html=True)
-
-st.write("")
-
-if not stage1_done:
-    st.info("Run at least one phase above, then come back here to save it.")
-else:
-    sv1, sv2 = st.columns([3, 1])
-    with sv1:
-        default_name = (
-            f"{mat.name.split('(')[0].strip()} → {cfg.target_c:.0f}°C "
-            f"({datetime.now():%H:%M})")
-        save_name = st.text_input("Name this run", value=default_name,
-                                  key="save_name_input")
-    with sv2:
-        st.write("")
-        st.write("")
-        do_save = st.button("💾 Save this run", type="primary",
-                            use_container_width=True)
-
-    if do_save:
-        snapshot = {
-            "name": save_name or default_name,
-            "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "material": mat.name,
-            "target_c": cfg.target_c,
-            "reached": state.target_reached,
-            "cycles": state.cycle,
-            "chamber_c": state.t_chamber,
-            "cop": avg_cop,
-            "csv": frame.to_csv(index=False),
-            "report": build_report(),
-        }
-        st.session_state.saved_runs.append(snapshot)
-        event(f"Run saved as \"{snapshot['name']}\".")
-        st.success(f"Saved as \"{snapshot['name']}\".")
-        st.rerun()
-
-    if st.session_state.saved_runs:
-        st.markdown(f"**Your saved runs ({len(st.session_state.saved_runs)})**")
-        for i, run in enumerate(reversed(st.session_state.saved_runs)):
-            badge = ("✅ Reached target" if run["reached"]
-                     else "⚠️ Did not reach target")
-            with st.expander(f"{run['name']}  —  {badge}", expanded=False):
-                rc1, rc2, rc3, rc4 = st.columns(4)
-                rc1.markdown(f'<div class="cap">Material</div>'
-                             f'<div class="figure" style="font-size:16px">'
-                             f'{run["material"]}</div>', unsafe_allow_html=True)
-                rc2.markdown(f'<div class="cap">Target</div>'
-                             f'<div class="figure" style="font-size:16px">'
-                             f'{run["target_c"]:.1f} °C</div>',
-                             unsafe_allow_html=True)
-                rc3.markdown(f'<div class="cap">Cycles</div>'
-                             f'<div class="figure" style="font-size:16px">'
-                             f'{run["cycles"]}</div>', unsafe_allow_html=True)
-                rc4.markdown(f'<div class="cap">COP</div>'
-                             f'<div class="figure" style="font-size:16px">'
-                             f'{run["cop"]:.2f}</div>', unsafe_allow_html=True)
-                st.caption(f"Saved {run['saved_at']}")
-
-                dc1, dc2 = st.columns(2)
-                orig_idx = len(st.session_state.saved_runs) - 1 - i
-                with dc1:
-                    if st.download_button(
-                            "Download data (CSV)", run["csv"].encode(),
-                            f"{run['name'].replace(' ', '_')}.csv",
-                            "text/csv", key=f"dl_csv_{orig_idx}",
-                            use_container_width=True):
-                        st.session_state.has_downloaded = True
-                with dc2:
-                    if st.download_button(
-                            "Download report (Markdown)",
-                            run["report"].encode(),
-                            f"{run['name'].replace(' ', '_')}.md",
-                            "text/markdown", key=f"dl_md_{orig_idx}",
-                            use_container_width=True):
-                        st.session_state.has_downloaded = True
-
-        if st.button("🗑 Clear all saved runs", key="clear_saved"):
-            st.session_state.saved_runs = []
-            event("Cleared all saved runs.")
-            st.rerun()
-
-st.write("")
-st.caption("Quick download without saving a named copy first:")
-
-
-
-e1, e2, e3 = st.columns(3)
-with e1:
-    if st.download_button("Download time series (CSV)",
-                          frame.to_csv(index=False).encode(),
-                          f"ecx_run_{datetime.now():%Y%m%d_%H%M}.csv",
-                          "text/csv", use_container_width=True):
-        st.session_state.has_downloaded = True
-with e2:
-    if st.download_button("Download test record (Markdown)",
-                          build_report().encode(),
-                          f"ecx_report_{datetime.now():%Y%m%d_%H%M}.md",
-                          "text/markdown", use_container_width=True):
-        st.session_state.has_downloaded = True
-with e3:
-    buf = io.StringIO(); frame.describe().to_csv(buf)
-    if st.download_button("Download summary statistics (CSV)",
-                          buf.getvalue().encode(), "ecx_summary.csv",
-                          "text/csv", use_container_width=True):
-        st.session_state.has_downloaded = True
-
-with st.expander("Last 25 logged steps"):
-    st.dataframe(frame.tail(25), use_container_width=True, hide_index=True)
-
-st.caption("Simulated process values. Experimental validation requires measured "
-           "transformation temperatures, the stress–strain hysteresis of the "
-           "actual element, heat-transfer coefficients, thermal masses and "
-           "actuator losses.")
+    hist = st.session_state["ai_ctx"].get("history", [])
+    if hist:
+        st.divider()
+        st.markdown("#### Your recent recommendation requests")
+        for h in hist[:8]:
+            tag = "✅ found a fit" if h["found"] else "❌ no fit found"
+            st.caption(f"{h['at'][:16].replace('T', ' ')} — "
+                      f"{MATERIALS[h['material']].name} → {h['target_c']:.1f} °C "
+                      f"@ {h['ambient_c']:.1f} °C ambient — {tag}")
