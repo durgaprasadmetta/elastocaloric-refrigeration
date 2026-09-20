@@ -106,18 +106,18 @@ class Config:
     material_key: str = "niti"
     exchanger_key: str = "finned_air"
     form: str = "tube"
-    n_elements: int = 5
-    length_mm: float = 150.0
-    od_mm: float = 12.0
-    id_mm: float = 10.0
+    n_elements: int = 20
+    length_mm: float = 300.0
+    od_mm: float = 0.5
+    id_mm: float = 0.0
     strain_pct: float = 5.0
     mode_compression: bool = False
     phase_time_s: float = 0.8
     flow_cfm: float = 50.0
     ambient_c: float = 25.0
-    target_c: float = 10.0
+    target_c: float = 16.0
     chamber_capacity: float = 800.0
-    insulation_ua: float = 0.35
+    insulation_ua: float = 0.20
     actuator_efficiency: float = 0.70
     regen_effectiveness: float = 0.0   # 0 = no regenerator (original model)
     custom_area_mm2: float = 50.0      # used only when form == "custom"
