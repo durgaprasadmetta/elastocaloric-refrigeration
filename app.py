@@ -105,12 +105,12 @@ EXCHANGERS: Dict[str, Exchanger] = {e.key: e for e in [
 class Config:
     material_key: str = "niti"
     exchanger_key: str = "finned_air"
-    form: str = "tube"
+    form: str = "wire"
     n_elements: int = 20
     length_mm: float = 300.0
     od_mm: float = 0.5
     id_mm: float = 0.0
-    strain_pct: float = 5.0
+    strain_pct: float = 4.5
     mode_compression: bool = False
     phase_time_s: float = 0.8
     flow_cfm: float = 50.0
