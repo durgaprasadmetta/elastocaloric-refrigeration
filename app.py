@@ -5,7 +5,7 @@ NiTi elastocaloric refrigeration demonstrator — physics + HMI
 + rule-based "material expert" recommendation agent.
 
 Run:      streamlit run app.py
-Requires: streamlit numpy pandas plotly
+Requires: streamlit numpy pandas matplotlib
 
 MODEL
 -----
@@ -77,10 +77,13 @@ from dataclasses import dataclass, fields, replace
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
+import matplotlib
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
 import streamlit as st
+
+matplotlib.use("Agg")
 
 # =================================================================
 # PART 1 — PHYSICS CORE  (unchanged from the original app)
@@ -852,32 +855,6 @@ def get_theme(dark: bool) -> dict:
     return base
 
 
-def plotly_theme_layout(fig: "go.Figure", t: dict, height: int = 340) -> "go.Figure":
-    """Applies the app's semantic theme to a Plotly figure and turns on a
-    smooth value-to-value transition, so a figure updated in place (same
-    `key=` passed to st.plotly_chart across reruns) animates rather than
-    hard-cuts to its new values — this is what gives the live charts a
-    continuously-moving feel while sequencing runs."""
-    fig.update_layout(
-        paper_bgcolor=t["PAPER"], plot_bgcolor=t["PAPER"],
-        font=dict(color=t["INK"], family="IBM Plex Sans, system-ui, sans-serif",
-                 size=12),
-        margin=dict(l=10, r=10, t=36, b=10), height=height,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right",
-                   x=1, font=dict(color=t["STEEL"], size=10),
-                   bgcolor="rgba(0,0,0,0)"),
-        xaxis=dict(gridcolor=t["LINE"], zerolinecolor=t["LINE"],
-                  color=t["STEEL"], linecolor=t["LINE"]),
-        yaxis=dict(gridcolor=t["LINE"], zerolinecolor=t["LINE"],
-                  color=t["STEEL"], linecolor=t["LINE"]),
-        transition=dict(duration=350, easing="cubic-in-out"),
-        hoverlabel=dict(bgcolor=t["PAPER"], font_color=t["INK"],
-                       bordercolor=t["LINE"]),
-        uirevision="keep",  # preserves the viewer's zoom/pan across reruns
-    )
-    return fig
-
-
 # --- persisted per-user state, loaded once per session ---------------
 if "active" not in st.session_state:
     st.session_state["active"] = full_active_dict(USER_ID)
@@ -1073,30 +1050,8 @@ div[data-testid="stAlertContentError"] {{ border-left:4px solid {t["ERROR"]} !im
 .step {{ background:{t["PAPER"]}; border:1px solid {t["LINE"]}; border-radius:4px;
   padding:14px 16px; min-height:118px; }}
 .step.active {{ border:1px solid {t["WARM"]};
-  background:{hex_to_rgba(t["WARM"], 0.08)};
-  animation: pulse-glow-warm 1.7s ease-out infinite; }}
+  background:{hex_to_rgba(t["WARM"], 0.08)}; }}
 .step.done {{ border-left:4px solid {t["GOOD"]}; }}
-@keyframes pulse-glow-warm {{
-  0%   {{ box-shadow: 0 0 0 0 {hex_to_rgba(t["WARM"], 0.38)}; }}
-  70%  {{ box-shadow: 0 0 0 11px {hex_to_rgba(t["WARM"], 0.0)}; }}
-  100% {{ box-shadow: 0 0 0 0 {hex_to_rgba(t["WARM"], 0.0)}; }}
-}}
-@keyframes pulse-glow-good {{
-  0%   {{ box-shadow: 0 0 0 0 {hex_to_rgba(t["GOOD"], 0.40)}; }}
-  70%  {{ box-shadow: 0 0 0 9px {hex_to_rgba(t["GOOD"], 0.0)}; }}
-  100% {{ box-shadow: 0 0 0 0 {hex_to_rgba(t["GOOD"], 0.0)}; }}
-}}
-@keyframes blink-dot {{
-  0%, 100% {{ opacity: 1; }} 50% {{ opacity: 0.25; }}
-}}
-.chip {{ position:relative; padding-left:20px !important; }}
-.chip::before {{ content:""; position:absolute; left:8px; top:50%;
-  width:6px; height:6px; border-radius:50%; transform:translateY(-50%); }}
-.chip.run::before {{ background:{t["WARM"]};
-  animation: blink-dot 1.1s ease-in-out infinite; }}
-.chip.hold::before {{ background:{t["GOOD"]};
-  animation: blink-dot 1.6s ease-in-out infinite; }}
-.chip.idle::before {{ background:{t["STEEL"]}; }}
 .step .n {{ font-family:'IBM Plex Mono',monospace; font-size:12px;
   color:{t["STEEL"]} !important; }}
 .step .t {{ font-size:15px; font-weight:600; margin-top:6px; }}
@@ -1472,63 +1427,17 @@ with tab_dash:
                        unsafe_allow_html=True)
     st.write("")
 
-    gauge_col, metrics_col = st.columns([1, 2.2])
-    with gauge_col:
-        _gauge_lo = min(cfg.target_c, env["t_min_c"]) - 5
-        _gauge_hi = cfg.ambient_c + 5
-        gauge_fig = go.Figure(go.Indicator(
-            mode="gauge+number+delta",
-            value=state.t_chamber,
-            number={"suffix": " °C", "font": {"size": 32, "color": theme["INK"]}},
-            delta={"reference": cfg.target_c,
-                  "decreasing": {"color": theme["GOOD"]},
-                  "increasing": {"color": theme["WARM"]}, "font": {"size": 13}},
-            title={"text": "Cold box vs target", "font": {"size": 12.5,
-                                                          "color": theme["STEEL"]}},
-            gauge={
-                "axis": {"range": [_gauge_lo, _gauge_hi],
-                        "tickcolor": theme["STEEL"],
-                        "tickfont": {"color": theme["STEEL"], "size": 9}},
-                "bar": {"color": theme["COLD"], "thickness": 0.28},
-                "bgcolor": theme["PAPER"],
-                "borderwidth": 1, "bordercolor": theme["LINE"],
-                "steps": [
-                    {"range": [_gauge_lo, cfg.target_c],
-                     "color": hex_to_rgba(theme["GOOD"], 0.18)},
-                    {"range": [cfg.target_c, cfg.ambient_c],
-                     "color": hex_to_rgba(theme["WARM"], 0.12)},
-                    {"range": [cfg.ambient_c, _gauge_hi],
-                     "color": hex_to_rgba(theme["STEEL"], 0.10)},
-                ],
-                "threshold": {"line": {"color": theme["GOOD"], "width": 3},
-                            "thickness": 0.85, "value": cfg.target_c},
-            },
-        ))
-        gauge_fig.update_layout(
-            paper_bgcolor=theme["PAPER"], font={"color": theme["INK"]},
-            margin=dict(l=18, r=18, t=46, b=6), height=220,
-            transition={"duration": 500, "easing": "cubic-in-out"},
-            uirevision="keep")
-        st.plotly_chart(gauge_fig, use_container_width=True,
-                       config={"displayModeBar": False}, key="gauge_chart")
-    with metrics_col:
-        for col, (cap, value, unit) in zip(st.columns(3), [
-                ("Cold box", f"{state.t_chamber:.2f}", "°C"),
-                ("Element", f"{state.t_element:.2f}", "°C"),
-                ("Coolant", f"{state.t_fluid:.2f}", "°C")]):
-            with col:
-                st.markdown(f'<div class="cap">{cap}</div><div class="figure">'
-                           f'{value} <small>{unit}</small></div>',
-                           unsafe_allow_html=True)
-        st.write("")
-        for col, (cap, value, unit) in zip(st.columns(3), [
-                ("Stress", f"{state.stress_mpa:.0f}", "MPa"),
-                ("Cooling duty", f"{state.q_cold_rate:.1f}", "W"),
-                ("COP, run average", f"{avg_cop:.2f}", "")]):
-            with col:
-                st.markdown(f'<div class="cap">{cap}</div><div class="figure">'
-                           f'{value} <small>{unit}</small></div>',
-                           unsafe_allow_html=True)
+    for col, (cap, value, unit) in zip(st.columns(6), [
+            ("Cold box", f"{state.t_chamber:.2f}", "°C"),
+            ("Element", f"{state.t_element:.2f}", "°C"),
+            ("Coolant", f"{state.t_fluid:.2f}", "°C"),
+            ("Stress", f"{state.stress_mpa:.0f}", "MPa"),
+            ("Cooling duty", f"{state.q_cold_rate:.1f}", "W"),
+            ("COP, run average", f"{avg_cop:.2f}", "")]):
+        with col:
+            st.markdown(f'<div class="cap">{cap}</div><div class="figure">'
+                       f'{value} <small>{unit}</small></div>',
+                       unsafe_allow_html=True)
 
     for severity, message in check_interlocks(cfg, state):
         (st.error if severity == "alarm" else st.warning)(message)
@@ -1552,68 +1461,63 @@ with tab_dash:
     log = st.session_state.log
     g1, g2 = st.columns([1.55, 1])
     with g1:
-        st.markdown("**Pull-down** · live, hover for exact values")
+        st.markdown("**Pull-down**")
+        fig, ax = plt.subplots(figsize=(8.2, 3.5))
+        ax.set_facecolor(theme["PAPER"]); ax.figure.patch.set_facecolor(theme["PAPER"])
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+        for side in ("left", "bottom"):
+            ax.spines[side].set_color(theme["LINE"])
+        ax.tick_params(colors=theme["STEEL"], labelsize=8)
+        ax.grid(True, color=theme["LINE"], linewidth=0.6, alpha=0.7)
+        ax.set_axisbelow(True)
         t_arr = np.asarray(log["t"])
-        pulldown_fig = go.Figure()
-        pulldown_fig.add_trace(go.Scatter(
-            x=t_arr, y=log["element"], mode="lines", name="Element",
-            line=dict(color=theme["WARM"], width=1.3), opacity=0.8))
-        pulldown_fig.add_trace(go.Scatter(
-            x=t_arr, y=log["chamber"], mode="lines", name="Cold box",
-            line=dict(color=theme["COLD"], width=3, shape="spline"),
-            fill="tozeroy", fillcolor=hex_to_rgba(theme["COLD"], 0.10)))
-        pulldown_fig.add_hline(y=cfg.target_c, line=dict(color=theme["GOOD"],
-                              dash="dash", width=1.4),
-                              annotation_text="Target",
-                              annotation_font_color=theme["GOOD"])
-        pulldown_fig.add_hline(y=cfg.ambient_c, line=dict(color=theme["STEEL"],
-                              dash="dot", width=1.1),
-                              annotation_text="Ambient",
-                              annotation_font_color=theme["STEEL"])
-        if t_arr.size:
-            pulldown_fig.add_trace(go.Scatter(
-                x=[t_arr[-1]], y=[log["chamber"][-1]], mode="markers",
-                marker=dict(size=11, color=theme["COLD"],
-                          line=dict(width=2, color=theme["PAPER"])),
-                showlegend=False, hoverinfo="skip"))
-        pulldown_fig.update_layout(xaxis_title="Elapsed time (s)",
-                                  yaxis_title="Temperature (°C)")
-        plotly_theme_layout(pulldown_fig, theme, height=360)
-        st.plotly_chart(pulldown_fig, use_container_width=True,
-                       config={"displayModeBar": False}, key="pulldown_chart")
+        ax.plot(t_arr, log["element"], color=theme["WARM"], lw=1.0, alpha=0.75,
+               label="Element")
+        ax.plot(t_arr, log["chamber"], color=theme["COLD"], lw=2.2, label="Cold box")
+        ax.axhline(cfg.target_c, color=theme["GOOD"], ls="--", lw=1.2, label="Target")
+        ax.axhline(cfg.ambient_c, color=theme["STEEL"], ls=":", lw=1.0, label="Ambient")
+        ax.set_xlabel("Elapsed time (s)", color=theme["STEEL"])
+        ax.set_ylabel("Temperature (°C)", color=theme["STEEL"])
+        leg = ax.legend(frameon=False, fontsize=8, ncols=4, loc="upper right")
+        for text in leg.get_texts():
+            text.set_color(theme["STEEL"])
+        st.pyplot(fig, clear_figure=True); plt.close(fig)
     with g2:
-        st.markdown("**Stress–strain path** · last 160 samples")
-        stress_fig = go.Figure()
-        stress_fig.add_trace(go.Scatter(
-            x=log["strain"][-160:], y=log["stress"][-160:], mode="lines",
-            line=dict(color=theme["INK"], width=1.5), opacity=0.75,
-            showlegend=False))
-        stress_fig.add_trace(go.Scatter(
-            x=[state.strain_pct], y=[state.stress_mpa], mode="markers",
-            marker=dict(size=15, color=theme["WARM"],
-                      line=dict(width=2, color=theme["PAPER"])),
-            showlegend=False))
-        stress_fig.update_layout(xaxis_title="Strain (%)",
-                                yaxis_title="Stress (MPa)")
-        plotly_theme_layout(stress_fig, theme, height=360)
-        st.plotly_chart(stress_fig, use_container_width=True,
-                       config={"displayModeBar": False}, key="stress_chart")
+        st.markdown("**Stress–strain path**")
+        fig2, ax2 = plt.subplots(figsize=(5.2, 3.5))
+        ax2.set_facecolor(theme["PAPER"]); ax2.figure.patch.set_facecolor(theme["PAPER"])
+        for side in ("top", "right"):
+            ax2.spines[side].set_visible(False)
+        for side in ("left", "bottom"):
+            ax2.spines[side].set_color(theme["LINE"])
+        ax2.tick_params(colors=theme["STEEL"], labelsize=8)
+        ax2.grid(True, color=theme["LINE"], linewidth=0.6, alpha=0.7)
+        ax2.plot(log["strain"][-160:], log["stress"][-160:],
+                color=theme["INK"], lw=1.4, alpha=0.85)
+        ax2.scatter([state.strain_pct], [state.stress_mpa],
+                   s=55, color=theme["WARM"], zorder=5)
+        ax2.set_xlabel("Strain (%)", color=theme["STEEL"])
+        ax2.set_ylabel("Stress (MPa)", color=theme["STEEL"])
+        st.pyplot(fig2, clear_figure=True); plt.close(fig2)
 
     h1, h2 = st.columns([1.55, 1])
     with h1:
         st.markdown("**Coefficient of performance per cycle**")
+        fig3, ax3 = plt.subplots(figsize=(8.2, 2.4))
+        ax3.set_facecolor(theme["PAPER"]); ax3.figure.patch.set_facecolor(theme["PAPER"])
+        for side in ("top", "right"):
+            ax3.spines[side].set_visible(False)
+        for side in ("left", "bottom"):
+            ax3.spines[side].set_color(theme["LINE"])
+        ax3.tick_params(colors=theme["STEEL"], labelsize=8)
+        ax3.grid(True, color=theme["LINE"], linewidth=0.6, alpha=0.7)
         cyc, cop_arr = np.asarray(log["cycle"]), np.asarray(log["cop"])
         mask = cyc > 0
-        cop_fig = go.Figure(go.Bar(
-            x=cyc[mask], y=cop_arr[mask],
-            marker=dict(color=theme["COLD"],
-                      line=dict(color=theme["COLD_HOVER"], width=0)),
-            name="COP"))
-        cop_fig.update_layout(xaxis_title="Cycle", yaxis_title="COP (–)",
-                             bargap=0.25)
-        plotly_theme_layout(cop_fig, theme, height=240)
-        st.plotly_chart(cop_fig, use_container_width=True,
-                       config={"displayModeBar": False}, key="cop_chart")
+        ax3.plot(cyc[mask], cop_arr[mask], color=theme["COLD"], lw=1.6)
+        ax3.set_xlabel("Cycle", color=theme["STEEL"])
+        ax3.set_ylabel("COP (–)", color=theme["STEEL"])
+        st.pyplot(fig3, clear_figure=True); plt.close(fig3)
     with h2:
         st.markdown("**Controller log**")
         lines = st.session_state.events or ["No events yet."]
